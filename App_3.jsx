@@ -6,7 +6,7 @@ import {
   DollarSign, RotateCcw, Star, ShoppingBag, CreditCard, Banknote, Smartphone,
   CalendarDays, Filter, Info, Sparkles, PackagePlus, History, Wallet, ChevronDown,
   ImagePlus, ImageOff, FileText, Download, ArrowDownCircle, ArrowUpCircle,
-  Lock, ShieldCheck, Landmark, UserCog, LockOpen,
+  Lock, ShieldCheck, Landmark, UserCog, LockOpen, Repeat, ClipboardList, Undo2, HandCoins,
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, LineChart, Line,
@@ -24,10 +24,12 @@ const NAV_ITEMS = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "pdv", label: "PDV", icon: ShoppingCart },
   { id: "vendas", label: "Vendas", icon: ReceiptIcon },
+  { id: "prazo", label: "Pagamentos a Prazo", icon: CreditCard, adminOnly: true },
   { id: "produtos", label: "Produtos", icon: Package },
   { id: "estoque", label: "Estoque", icon: PackagePlus, adminOnly: true },
   { id: "clientes", label: "Clientes", icon: Users },
   { id: "vendedores", label: "Vendedores", icon: UserRound, adminOnly: true },
+  { id: "consignacao", label: "Consignação", icon: Repeat, adminOnly: true },
   { id: "comissoes", label: "Comissões", icon: Percent },
   { id: "financeiro", label: "Financeiro", icon: Landmark, adminOnly: true },
   { id: "relatorios", label: "Relatórios", icon: FileText, adminOnly: true },
@@ -321,6 +323,57 @@ function buildSeed() {
     },
   ];
 
+  // ---- Pagamentos a prazo (demo) ----
+  const prazoItems1 = [
+    { productId: "p3", productName: productMap.p3.name, qty: 1, price: productMap.p3.price },
+    { productId: "p8", productName: productMap.p8.name, qty: 1, price: productMap.p8.price },
+  ];
+  const prazoTotal1 = prazoItems1.reduce((s, it) => s + it.price * it.qty, 0);
+  const installmentSales = [
+    {
+      id: uid("prazo"), number: "000001", date: daysAgoISO(9, 10, 0), customerId: "c3",
+      items: prazoItems1, totalAmount: prazoTotal1, dueDate: daysAgoISO(-5).slice(0, 10),
+      notes: "Combinado pagar em 2 vezes.",
+      payments: [
+        { id: uid("pgto"), date: daysAgoISO(9, 10, 5), amount: 40, method: "dinheiro", note: "Entrada", user: "Fabi" },
+      ],
+      status: "parcial", createdBy: "Fabi",
+    },
+  ];
+
+  // ---- Consignação — saídas para vendedoras (demo) ----
+  const consItemsClosed = [
+    { productId: "p1", productName: productMap.p1.name, price: productMap.p1.price, cost: productMap.p1.cost, delivered: 3, sold: 3, returned: 0 },
+    { productId: "p4", productName: productMap.p4.name, price: productMap.p4.price, cost: productMap.p4.cost, delivered: 2, sold: 1, returned: 1 },
+  ];
+  const consItemsOpen = [
+    { productId: "p5", productName: productMap.p5.name, price: productMap.p5.price, cost: productMap.p5.cost, delivered: 4, sold: 0, returned: 0 },
+    { productId: "p7", productName: productMap.p7.name, price: productMap.p7.price, cost: productMap.p7.cost, delivered: 5, sold: 0, returned: 0 },
+  ];
+  const consignmentClosedId = uid("cons");
+  const consignments = [
+    { id: consignmentClosedId, sellerId: "v1", sellerName: "Maria Santos", date: daysAgoISO(18, 9, 0), items: consItemsClosed, period: 30, notes: "", status: "fechado" },
+    { id: uid("cons"), sellerId: "v3", sellerName: "Camila Rocha", date: daysAgoISO(6, 9, 0), items: consItemsOpen, period: 30, notes: "", status: "aberto" },
+  ];
+
+  const settleSoldTotal = consItemsClosed.reduce((s, it) => s + it.price * it.sold, 0);
+  const settleCostTotal = consItemsClosed.reduce((s, it) => s + it.cost * it.sold, 0);
+  const settleCommissionPercent = sellers.find((s) => s.id === "v1").commissionPercent;
+  const settleCommissionAmount = settleSoldTotal * (settleCommissionPercent / 100);
+  const settlements = [
+    {
+      id: uid("acerto"), number: "000001", consignmentId: consignmentClosedId, sellerId: "v1", sellerName: "Maria Santos",
+      date: daysAgoISO(3, 15, 0),
+      itemsSold: consItemsClosed.filter((it) => it.sold > 0).map((it) => ({ productId: it.productId, productName: it.productName, qty: it.sold, price: it.price, cost: it.cost })),
+      itemsReturned: consItemsClosed.filter((it) => it.returned > 0).map((it) => ({ productId: it.productId, productName: it.productName, qty: it.returned })),
+      totalSold: settleSoldTotal, totalCost: settleCostTotal,
+      commissionPercent: settleCommissionPercent, commissionAmount: settleCommissionAmount,
+      netToRepass: settleSoldTotal - settleCommissionAmount,
+      repasseStatus: "pendente", repassePaidAt: null, repasseNote: "",
+      status: "finalizado", createdBy: "Fabi",
+    },
+  ];
+
   return {
     products,
     categories: [...DEFAULT_CATEGORIES],
@@ -330,6 +383,9 @@ function buildSeed() {
     stockMovements,
     financeTransactions,
     cashRegisters,
+    installmentSales,
+    consignments,
+    settlements,
     settings: {
       companyName: "Fabi Cosméticos",
       phone: "",
@@ -476,6 +532,9 @@ function withDefaults(data) {
     stockMovements: data.stockMovements || [],
     financeTransactions: data.financeTransactions || [],
     cashRegisters: data.cashRegisters || [],
+    installmentSales: data.installmentSales || [],
+    consignments: data.consignments || [],
+    settlements: data.settlements || [],
     settings: {
       companyName: "Fabi Cosméticos", phone: "", whatsapp: "", instagram: "", address: "", cnpj: "",
       receiptMessage: "Obrigado pela preferência!", defaultMinStock: 5, ...(data.settings || {}),
@@ -630,10 +689,12 @@ export default function FabiCosmeticosApp() {
         {section === "dashboard" && <Dashboard db={db} role={role} setSection={setSection} />}
         {section === "pdv" && <Pdv db={db} role={role} updateDb={updateDb} pushToast={pushToast} />}
         {section === "vendas" && <Vendas db={db} role={role} updateDb={updateDb} pushToast={pushToast} askConfirm={askConfirm} />}
+        {section === "prazo" && isAdmin && <PagamentosPrazo db={db} updateDb={updateDb} pushToast={pushToast} askConfirm={askConfirm} />}
         {section === "produtos" && <Produtos db={db} role={role} updateDb={updateDb} pushToast={pushToast} askConfirm={askConfirm} />}
         {section === "estoque" && isAdmin && <Estoque db={db} updateDb={updateDb} pushToast={pushToast} />}
         {section === "clientes" && <Clientes db={db} role={role} updateDb={updateDb} pushToast={pushToast} askConfirm={askConfirm} />}
         {section === "vendedores" && isAdmin && <Vendedores db={db} updateDb={updateDb} pushToast={pushToast} askConfirm={askConfirm} />}
+        {section === "consignacao" && isAdmin && <Consignacao db={db} updateDb={updateDb} pushToast={pushToast} askConfirm={askConfirm} />}
         {section === "comissoes" && <Comissoes db={db} role={role} updateDb={updateDb} pushToast={pushToast} />}
         {section === "financeiro" && isAdmin && <Financeiro db={db} updateDb={updateDb} pushToast={pushToast} askConfirm={askConfirm} />}
         {section === "relatorios" && isAdmin && <Relatorios db={db} />}
@@ -1654,7 +1715,10 @@ function Estoque({ db, updateDb, pushToast }) {
     setEntryOpen(false);
   };
 
-  const movementBadge = { entrada: "success", venda: "neutral", devolução: "warn", ajuste: "neutral" };
+  const movementBadge = {
+    entrada: "success", venda: "neutral", devolução: "warn", ajuste: "neutral",
+    "venda-prazo": "neutral", "saida-vendedora": "warn", "devolucao-vendedora": "warn",
+  };
 
   return (
     <div className="page">
@@ -1754,11 +1818,15 @@ function Clientes({ db, role, updateDb, pushToast, askConfirm }) {
 
   const stats = (customerId) => {
     const sales = db.sales.filter((s) => s.customerId === customerId && s.status !== "cancelada");
+    const prazoSales = db.installmentSales.filter((s) => s.customerId === customerId);
+    const prazoTotal = prazoSales.reduce((sum, s) => sum + s.totalAmount, 0);
+    const prazoPaid = prazoSales.reduce((sum, s) => sum + s.payments.reduce((a, p) => a + p.amount, 0), 0);
+    const prazoOpen = prazoTotal - prazoPaid;
     return {
       total: sales.length,
       spent: sales.reduce((sum, s) => sum + s.total, 0),
       last: sales.sort((a, b) => new Date(b.date) - new Date(a.date))[0]?.date,
-      sales,
+      sales, prazoSales, prazoTotal, prazoPaid, prazoOpen,
     };
   };
 
@@ -1805,7 +1873,7 @@ function Clientes({ db, role, updateDb, pushToast, askConfirm }) {
         ) : (
           <div className="table-wrap">
             <table className="table">
-              <thead><tr><th>Nome</th><th>Telefone</th><th>Compras</th><th>Total gasto</th><th>Última compra</th><th></th></tr></thead>
+              <thead><tr><th>Nome</th><th>Telefone</th><th>Compras</th><th>Total gasto</th><th>Última compra</th><th>Saldo devedor</th><th></th></tr></thead>
               <tbody>
                 {filtered.map((c) => {
                   const s = stats(c.id);
@@ -1813,6 +1881,7 @@ function Clientes({ db, role, updateDb, pushToast, askConfirm }) {
                     <tr key={c.id} className="table-row-click" onClick={() => setDetail(c)}>
                       <td>{c.name}</td><td>{c.phone || "—"}</td><td>{s.total}</td>
                       <td>{money(s.spent)}</td><td>{fmtDate(s.last)}</td>
+                      <td>{s.prazoOpen > 0 ? <Badge tone="danger">{money(s.prazoOpen)}</Badge> : "—"}</td>
                       <td onClick={(e) => e.stopPropagation()}>
                         <div className="row-actions">
                           <button className="icon-btn" onClick={() => openEdit(c)}><Pencil size={15} /></button>
@@ -1852,7 +1921,7 @@ function Clientes({ db, role, updateDb, pushToast, askConfirm }) {
                 <div><p className="success-label">Valor gasto</p><p className="success-value">{money(s.spent)}</p></div>
                 <div><p className="success-label">Última compra</p><p className="success-value">{fmtDate(s.last)}</p></div>
               </div>
-              <h4 style={{ margin: "14px 0 8px", fontFamily: "var(--font-display)" }}>Histórico de compras</h4>
+              <h4 style={{ margin: "14px 0 8px", fontFamily: "'Playfair Display', serif" }}>Histórico de compras</h4>
               {s.sales.length === 0 ? <EmptyState icon={ReceiptIcon} title="Nenhuma compra ainda" /> : (
                 <div className="table-wrap">
                   <table className="table">
@@ -1862,6 +1931,34 @@ function Clientes({ db, role, updateDb, pushToast, askConfirm }) {
                     ))}</tbody>
                   </table>
                 </div>
+              )}
+
+              {s.prazoSales.length > 0 && (
+                <>
+                  <h4 style={{ margin: "18px 0 8px", fontFamily: "'Playfair Display', serif" }}>Vendas a prazo</h4>
+                  <div className="detail-grid" style={{ marginBottom: 10 }}>
+                    <div><p className="success-label">Total a prazo</p><p className="success-value">{money(s.prazoTotal)}</p></div>
+                    <div><p className="success-label">Total pago</p><p className="success-value text-forest-strong">{money(s.prazoPaid)}</p></div>
+                    <div><p className="success-label">Saldo em aberto</p><p className="success-value" style={{ color: s.prazoOpen > 0 ? "var(--danger)" : "inherit" }}>{money(s.prazoOpen)}</p></div>
+                    <div><p className="success-label">Nº de vendas a prazo</p><p className="success-value">{s.prazoSales.length}</p></div>
+                  </div>
+                  <div className="table-wrap">
+                    <table className="table">
+                      <thead><tr><th>Nº</th><th>Data</th><th>Total</th><th>Pago</th><th>Saldo</th><th>Status</th></tr></thead>
+                      <tbody>{s.prazoSales.sort((a, b) => new Date(b.date) - new Date(a.date)).map((ps) => {
+                        const paid = ps.payments.reduce((a, p) => a + p.amount, 0);
+                        const saldo = ps.totalAmount - paid;
+                        return (
+                          <tr key={ps.id}>
+                            <td>#{ps.number}</td><td>{fmtDate(ps.date)}</td><td>{money(ps.totalAmount)}</td>
+                            <td className="text-forest-strong">{money(paid)}</td><td className={saldo > 0 ? "text-danger" : ""}>{money(saldo)}</td>
+                            <td><Badge tone={ps.status === "pago" ? "success" : "warn"}>{ps.status === "pago" ? "Pago" : ps.status === "parcial" ? "Parcial" : "Em aberto"}</Badge></td>
+                          </tr>
+                        );
+                      })}</tbody>
+                    </table>
+                  </div>
+                </>
               )}
             </div>
           );
@@ -1882,7 +1979,18 @@ function Vendedores({ db, updateDb, pushToast, askConfirm }) {
 
   const stats = (sellerId) => {
     const sales = db.sales.filter((s) => s.sellerId === sellerId && s.status !== "cancelada");
-    return { count: sales.length, total: sales.reduce((sum, s) => sum + s.total, 0), commission: sales.reduce((sum, s) => sum + s.commissionAmount, 0) };
+    const cons = db.consignments.filter((c) => c.sellerId === sellerId);
+    const delivered = cons.reduce((sum, c) => sum + c.items.reduce((s, it) => s + it.delivered, 0), 0);
+    const sold = cons.reduce((sum, c) => sum + c.items.reduce((s, it) => s + it.sold, 0), 0);
+    const returned = cons.reduce((sum, c) => sum + c.items.reduce((s, it) => s + it.returned, 0), 0);
+    const pending = delivered - sold - returned;
+    const settles = db.settlements.filter((st) => st.sellerId === sellerId);
+    const consCommission = settles.reduce((sum, st) => sum + st.commissionAmount, 0);
+    const toRepass = settles.filter((st) => st.repasseStatus === "pendente").reduce((sum, st) => sum + st.netToRepass, 0);
+    return {
+      count: sales.length, total: sales.reduce((sum, s) => sum + s.total, 0), commission: sales.reduce((sum, s) => sum + s.commissionAmount, 0),
+      hasConsignment: cons.length > 0, delivered, sold, returned, pending, consCommission, toRepass,
+    };
   };
 
   const openNew = () => { setForm(emptySeller); setEditingId(null); setModalOpen(true); };
@@ -1933,6 +2041,19 @@ function Vendedores({ db, updateDb, pushToast, askConfirm }) {
                   <div><p className="stat-label">Total vendido</p><p className="stat-value-sm">{money(st.total)}</p></div>
                   <div><p className="stat-label">Comissão gerada</p><p className="stat-value-sm text-gold-strong">{money(st.commission)}</p></div>
                 </div>
+                {st.hasConsignment && (
+                  <div className="seller-cons-block">
+                    <p className="seller-cons-title"><Repeat size={12} /> Consignação</p>
+                    <div className="seller-stats seller-stats-6">
+                      <div><p className="stat-label">Recebidos</p><p className="stat-value-sm">{st.delivered}</p></div>
+                      <div><p className="stat-label">Vendidos</p><p className="stat-value-sm">{st.sold}</p></div>
+                      <div><p className="stat-label">Devolvidos</p><p className="stat-value-sm">{st.returned}</p></div>
+                      <div><p className="stat-label">Pendentes</p><p className="stat-value-sm">{st.pending}</p></div>
+                      <div><p className="stat-label">Comissão</p><p className="stat-value-sm text-gold-strong">{money(st.consCommission)}</p></div>
+                      <div><p className="stat-label">A repassar</p><p className="stat-value-sm text-danger">{money(st.toRepass)}</p></div>
+                    </div>
+                  </div>
+                )}
                 <div className="row-actions" style={{ justifyContent: "flex-end", marginTop: 10 }}>
                   <button className="icon-btn" onClick={() => openEdit(s)}><Pencil size={15} /></button>
                   <button className="icon-btn icon-btn-danger" onClick={() => remove(s)}><Trash2 size={15} /></button>
@@ -2609,6 +2730,594 @@ function RelatorioProdutos({ db }) {
   );
 }
 
+/* ============================== PAGAMENTOS A PRAZO ============================== */
+
+function nextGenericNumber(list) {
+  const max = list.reduce((m, s) => {
+    const n = parseInt(String(s.number).replace(/\D/g, ""), 10);
+    return isNaN(n) ? m : Math.max(m, n);
+  }, 0);
+  return String(max + 1).padStart(6, "0");
+}
+
+const emptyPrazoForm = { customerId: "", date: new Date().toISOString().slice(0, 10), dueDate: "", notes: "", initialPayment: "", initialMethod: "dinheiro" };
+
+function PagamentosPrazo({ db, updateDb, pushToast, askConfirm }) {
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [modalOpen, setModalOpen] = useState(false);
+  const [form, setForm] = useState(emptyPrazoForm);
+  const [cartItems, setCartItems] = useState([]); // {productId, qty, price}
+  const [pickProduct, setPickProduct] = useState("");
+  const [pickQty, setPickQty] = useState("1");
+  const [detail, setDetail] = useState(null);
+  const [payForm, setPayForm] = useState({ amount: "", date: new Date().toISOString().slice(0, 10), method: "dinheiro", note: "" });
+
+  const customerOf = (id) => db.customers.find((c) => c.id === id);
+
+  const filtered = db.installmentSales.filter((s) => {
+    const q = search.trim().toLowerCase();
+    const matchesSearch = !q || (customerOf(s.customerId)?.name || "").toLowerCase().includes(q) || String(s.number).includes(q);
+    const matchesStatus = !statusFilter || s.status === statusFilter;
+    return matchesSearch && matchesStatus;
+  }).sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  const totalsAll = db.installmentSales.reduce((acc, s) => {
+    const paid = s.payments.reduce((sum, p) => sum + p.amount, 0);
+    acc.total += s.totalAmount; acc.paid += paid; acc.open += Math.max(s.totalAmount - paid, 0);
+    return acc;
+  }, { total: 0, paid: 0, open: 0 });
+
+  const addItem = () => {
+    const product = db.products.find((p) => p.id === pickProduct);
+    const qty = Number(pickQty);
+    if (!product) { pushToast("Selecione um produto.", "error"); return; }
+    if (!qty || qty <= 0) { pushToast("Informe uma quantidade válida.", "error"); return; }
+    const alreadyInCart = cartItems.find((i) => i.productId === product.id)?.qty || 0;
+    if (alreadyInCart + qty > product.stock) { pushToast(`Estoque insuficiente para ${product.name}. Disponível: ${product.stock}.`, "error"); return; }
+    setCartItems((prev) => {
+      const found = prev.find((i) => i.productId === product.id);
+      if (found) return prev.map((i) => i.productId === product.id ? { ...i, qty: i.qty + qty } : i);
+      return [...prev, { productId: product.id, productName: product.name, qty, price: product.price }];
+    });
+    setPickProduct(""); setPickQty("1");
+  };
+
+  const removeItem = (productId) => setCartItems((prev) => prev.filter((i) => i.productId !== productId));
+
+  const cartTotal = cartItems.reduce((s, i) => s + i.price * i.qty, 0);
+
+  const openNew = () => { setForm(emptyPrazoForm); setCartItems([]); setModalOpen(true); };
+
+  const save = () => {
+    if (!form.customerId) { pushToast("Selecione o cliente.", "error"); return; }
+    if (cartItems.length === 0) { pushToast("Adicione ao menos um produto.", "error"); return; }
+    const initial = Number(form.initialPayment) || 0;
+    if (initial > cartTotal) { pushToast("O valor pago não pode ser maior que o total da venda.", "error"); return; }
+    for (const it of cartItems) {
+      const p = db.products.find((pp) => pp.id === it.productId);
+      if (!p || it.qty > p.stock) { pushToast(`Estoque insuficiente: ${it.productName}.`, "error"); return; }
+    }
+
+    const number = nextGenericNumber(db.installmentSales);
+    const date = new Date(form.date).toISOString();
+    const id = uid("prazo");
+    const payments = initial > 0 ? [{ id: uid("pgto"), date, amount: initial, method: form.initialMethod, note: "Pagamento inicial", user: "Fabi" }] : [];
+    const record = {
+      id, number, date, customerId: form.customerId, items: cartItems, totalAmount: cartTotal,
+      dueDate: form.dueDate || null, notes: form.notes, payments,
+      status: initial >= cartTotal ? "pago" : initial > 0 ? "parcial" : "aberto", createdBy: "Fabi",
+    };
+
+    const movements = cartItems.map((it) => {
+      const p = db.products.find((pp) => pp.id === it.productId);
+      return { id: uid("mov"), date, productId: it.productId, productName: it.productName, type: "venda-prazo", qty: -it.qty, previous: p.stock, after: p.stock - it.qty, reason: `Venda a prazo #${number}`, user: "Fabi" };
+    });
+
+    updateDb((prev) => ({
+      ...prev,
+      installmentSales: [record, ...prev.installmentSales],
+      products: prev.products.map((p) => {
+        const it = cartItems.find((i) => i.productId === p.id);
+        return it ? { ...p, stock: p.stock - it.qty } : p;
+      }),
+      stockMovements: [...movements, ...prev.stockMovements],
+    }));
+    pushToast(`Venda a prazo #${number} registrada.`);
+    setModalOpen(false);
+  };
+
+  const registerPayment = () => {
+    const amount = Number(payForm.amount);
+    const paidSoFar = detail.payments.reduce((s, p) => s + p.amount, 0);
+    const saldo = detail.totalAmount - paidSoFar;
+    if (!amount || amount <= 0) { pushToast("Informe um valor válido.", "error"); return; }
+    if (amount > saldo + 0.0001) { pushToast(`O valor não pode ser maior que o saldo devedor (${money(saldo)}).`, "error"); return; }
+    const newPayment = { id: uid("pgto"), date: new Date(payForm.date).toISOString(), amount, method: payForm.method, note: payForm.note, user: "Fabi" };
+    updateDb((prev) => ({
+      ...prev,
+      installmentSales: prev.installmentSales.map((s) => {
+        if (s.id !== detail.id) return s;
+        const payments = [...s.payments, newPayment];
+        const paid = payments.reduce((sum, p) => sum + p.amount, 0);
+        return { ...s, payments, status: paid >= s.totalAmount ? "pago" : paid > 0 ? "parcial" : "aberto" };
+      }),
+    }));
+    setDetail((d) => {
+      const payments = [...d.payments, newPayment];
+      const paid = payments.reduce((sum, p) => sum + p.amount, 0);
+      return { ...d, payments, status: paid >= d.totalAmount ? "pago" : paid > 0 ? "parcial" : "aberto" };
+    });
+    setPayForm({ amount: "", date: new Date().toISOString().slice(0, 10), method: "dinheiro", note: "" });
+    pushToast("Pagamento registrado.");
+  };
+
+  const statusTone = { aberto: "warn", parcial: "warn", pago: "success" };
+  const statusLabel = { aberto: "Em aberto", parcial: "Parcialmente pago", pago: "Pago" };
+
+  return (
+    <div className="page">
+      <div className="page-header">
+        <div><p className="page-eyebrow">Financeiro</p><h1 className="page-title">Pagamentos a Prazo</h1></div>
+        <button className="btn-gold" onClick={openNew}><Plus size={16} /> Nova venda a prazo</button>
+      </div>
+
+      <div className="stat-grid stat-grid-3">
+        <StatCard icon={DollarSign} tone="forest" label="Total vendido a prazo" value={money(totalsAll.total)} />
+        <StatCard icon={Check} tone="forest" label="Total recebido" value={money(totalsAll.paid)} />
+        <StatCard icon={AlertTriangle} tone="warn" label="Total em aberto" value={money(totalsAll.open)} />
+      </div>
+
+      <div className="card filter-bar">
+        <div className="search-box"><Search size={16} /><input placeholder="Buscar por cliente ou número…" value={search} onChange={(e) => setSearch(e.target.value)} /></div>
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ maxWidth: 200 }}>
+          <option value="">Todos os status</option>
+          <option value="aberto">Em aberto</option>
+          <option value="parcial">Parcialmente pago</option>
+          <option value="pago">Pago</option>
+        </select>
+      </div>
+
+      <div className="card">
+        {filtered.length === 0 ? (
+          <EmptyState icon={CreditCard} title="Nenhuma venda a prazo encontrada" subtitle="Registre uma nova venda a prazo para começar." actionLabel="Nova venda a prazo" onAction={openNew} />
+        ) : (
+          <div className="table-wrap">
+            <table className="table">
+              <thead><tr><th>Nº</th><th>Cliente</th><th>Data</th><th>Total</th><th>Pago</th><th>Saldo</th><th>Status</th></tr></thead>
+              <tbody>
+                {filtered.map((s) => {
+                  const paid = s.payments.reduce((sum, p) => sum + p.amount, 0);
+                  const saldo = s.totalAmount - paid;
+                  return (
+                    <tr key={s.id} className="table-row-click" onClick={() => setDetail(s)}>
+                      <td>#{s.number}</td>
+                      <td>{customerOf(s.customerId)?.name || "—"}</td>
+                      <td>{fmtDate(s.date)}</td>
+                      <td>{money(s.totalAmount)}</td>
+                      <td className="text-forest-strong">{money(paid)}</td>
+                      <td className={saldo > 0 ? "text-danger" : ""}>{money(saldo)}</td>
+                      <td><Badge tone={statusTone[s.status]}>{statusLabel[s.status]}</Badge></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Nova venda a prazo" wide>
+        <div className="form-grid">
+          <Field label="Cliente" required span>
+            <select value={form.customerId} onChange={(e) => setForm((f) => ({ ...f, customerId: e.target.value }))}>
+              <option value="">Selecione…</option>
+              {db.customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Data da venda"><input type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} /></Field>
+          <Field label="Previsão de pagamento"><input type="date" value={form.dueDate} onChange={(e) => setForm((f) => ({ ...f, dueDate: e.target.value }))} /></Field>
+        </div>
+
+        <Field label="Produtos" required>
+          <div className="inline-select-row">
+            <select value={pickProduct} onChange={(e) => setPickProduct(e.target.value)}>
+              <option value="">Selecione um produto…</option>
+              {db.products.filter((p) => p.status === "ativo").map((p) => <option key={p.id} value={p.id}>{p.name} · {money(p.price)} · estoque {p.stock}</option>)}
+            </select>
+            <input type="number" min="1" style={{ maxWidth: 80 }} value={pickQty} onChange={(e) => setPickQty(e.target.value)} />
+            <button className="btn-outline btn-sm" onClick={addItem}><Plus size={14} /> Adicionar</button>
+          </div>
+        </Field>
+
+        {cartItems.length > 0 && (
+          <div className="table-wrap" style={{ marginBottom: 12 }}>
+            <table className="table">
+              <thead><tr><th>Produto</th><th>Qtd</th><th>Preço</th><th>Subtotal</th><th></th></tr></thead>
+              <tbody>
+                {cartItems.map((it) => (
+                  <tr key={it.productId}>
+                    <td>{it.productName}</td><td>{it.qty}</td><td>{money(it.price)}</td><td>{money(it.price * it.qty)}</td>
+                    <td><button className="icon-btn icon-btn-danger" onClick={() => removeItem(it.productId)}><Trash2 size={14} /></button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="totals-block">
+          <div className="totals-row totals-total"><span>Total da venda</span><span>{money(cartTotal)}</span></div>
+        </div>
+
+        <div className="form-grid">
+          <Field label="Valor pago agora (opcional)"><input type="number" min="0" step="0.01" value={form.initialPayment} onChange={(e) => setForm((f) => ({ ...f, initialPayment: e.target.value }))} /></Field>
+          <Field label="Forma de recebimento">
+            <select value={form.initialMethod} onChange={(e) => setForm((f) => ({ ...f, initialMethod: e.target.value }))}>
+              {PAYMENT_METHODS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+            </select>
+          </Field>
+          <Field label="Observação" span><textarea rows={2} value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} /></Field>
+        </div>
+
+        <button className="btn-gold btn-block" onClick={save}>Registrar venda a prazo</button>
+      </Modal>
+
+      <Modal open={!!detail} onClose={() => setDetail(null)} title={detail ? `Venda a prazo #${detail.number}` : ""} wide>
+        {detail && (() => {
+          const paid = detail.payments.reduce((s, p) => s + p.amount, 0);
+          const saldo = detail.totalAmount - paid;
+          return (
+            <div>
+              <div className="detail-grid">
+                <div><p className="success-label">Cliente</p><p className="success-value">{customerOf(detail.customerId)?.name || "—"}</p></div>
+                <div><p className="success-label">Data</p><p className="success-value">{fmtDate(detail.date)}</p></div>
+                <div><p className="success-label">Total</p><p className="success-value">{money(detail.totalAmount)}</p></div>
+                <div><p className="success-label">Status</p><p className="success-value"><Badge tone={statusTone[detail.status]}>{statusLabel[detail.status]}</Badge></p></div>
+              </div>
+              <div className="table-wrap" style={{ marginBottom: 12 }}>
+                <table className="table">
+                  <thead><tr><th>Produto</th><th>Qtd</th><th>Preço</th><th>Subtotal</th></tr></thead>
+                  <tbody>{detail.items.map((it, i) => <tr key={i}><td>{it.productName}</td><td>{it.qty}</td><td>{money(it.price)}</td><td>{money(it.price * it.qty)}</td></tr>)}</tbody>
+                </table>
+              </div>
+              <div className="totals-block">
+                <div className="totals-row"><span>Total</span><span>{money(detail.totalAmount)}</span></div>
+                <div className="totals-row"><span>Pago</span><span className="text-forest-strong">{money(paid)}</span></div>
+                <div className="totals-row totals-total"><span>Saldo devedor</span><span>{money(saldo)}</span></div>
+              </div>
+
+              <h4 style={{ margin: "16px 0 8px", fontFamily: "'Playfair Display', serif" }}>Histórico de pagamentos</h4>
+              {detail.payments.length === 0 ? <EmptyState icon={History} title="Nenhum pagamento registrado ainda" /> : (
+                <div className="table-wrap" style={{ marginBottom: 12 }}>
+                  <table className="table">
+                    <thead><tr><th>Data</th><th>Valor</th><th>Forma</th><th>Observação</th></tr></thead>
+                    <tbody>{detail.payments.map((p) => (
+                      <tr key={p.id}><td>{fmtDateTime(p.date)}</td><td className="text-forest-strong">{money(p.amount)}</td><td>{PAYMENT_METHODS.find((m) => m.id === p.method)?.label || p.method}</td><td>{p.note || "—"}</td></tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              )}
+
+              {saldo > 0 && (
+                <div className="margin-preview" style={{ display: "block" }}>
+                  <p style={{ fontWeight: 700, marginBottom: 8 }}>Registrar novo pagamento</p>
+                  <div className="form-grid">
+                    <Field label="Valor"><input type="number" min="0" step="0.01" value={payForm.amount} onChange={(e) => setPayForm((f) => ({ ...f, amount: e.target.value }))} /></Field>
+                    <Field label="Data"><input type="date" value={payForm.date} onChange={(e) => setPayForm((f) => ({ ...f, date: e.target.value }))} /></Field>
+                    <Field label="Forma">
+                      <select value={payForm.method} onChange={(e) => setPayForm((f) => ({ ...f, method: e.target.value }))}>
+                        {PAYMENT_METHODS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Observação"><input value={payForm.note} onChange={(e) => setPayForm((f) => ({ ...f, note: e.target.value }))} /></Field>
+                  </div>
+                  <button className="btn-gold btn-block" onClick={registerPayment}>Confirmar pagamento</button>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </Modal>
+    </div>
+  );
+}
+
+/* ============================== CONSIGNAÇÃO (SAÍDAS + ACERTOS) ============================== */
+
+const emptyConsForm = { sellerId: "", date: new Date().toISOString().slice(0, 10), period: "30", notes: "" };
+
+function Consignacao({ db, updateDb, pushToast, askConfirm }) {
+  const [tab, setTab] = useState("saidas");
+  const [modalOpen, setModalOpen] = useState(false);
+  const [form, setForm] = useState(emptyConsForm);
+  const [cartItems, setCartItems] = useState([]); // {productId, productName, qty, price, cost}
+  const [pickProduct, setPickProduct] = useState("");
+  const [pickQty, setPickQty] = useState("1");
+  const [settleModal, setSettleModal] = useState(null); // consignment being settled
+  const [settleQty, setSettleQty] = useState({}); // { [productId]: {sold, returned} }
+  const [repasseModal, setRepasseModal] = useState(null);
+  const [repasseForm, setRepasseForm] = useState({ date: new Date().toISOString().slice(0, 10), note: "" });
+
+  const sellerOf = (id) => db.sellers.find((s) => s.id === id);
+
+  const pendingOf = (item) => item.delivered - item.sold - item.returned;
+  const consignmentPending = (c) => c.items.reduce((s, it) => s + pendingOf(it), 0);
+
+  const addItem = () => {
+    const product = db.products.find((p) => p.id === pickProduct);
+    const qty = Number(pickQty);
+    if (!product) { pushToast("Selecione um produto.", "error"); return; }
+    if (!qty || qty <= 0) { pushToast("Informe uma quantidade válida.", "error"); return; }
+    const alreadyInCart = cartItems.find((i) => i.productId === product.id)?.qty || 0;
+    if (alreadyInCart + qty > product.stock) { pushToast(`Estoque insuficiente para ${product.name}. Disponível: ${product.stock}.`, "error"); return; }
+    setCartItems((prev) => {
+      const found = prev.find((i) => i.productId === product.id);
+      if (found) return prev.map((i) => i.productId === product.id ? { ...i, qty: i.qty + qty } : i);
+      return [...prev, { productId: product.id, productName: product.name, qty, price: product.price, cost: product.cost }];
+    });
+    setPickProduct(""); setPickQty("1");
+  };
+  const removeItem = (productId) => setCartItems((prev) => prev.filter((i) => i.productId !== productId));
+
+  const openNew = () => { setForm(emptyConsForm); setCartItems([]); setModalOpen(true); };
+
+  const save = () => {
+    if (!form.sellerId) { pushToast("Selecione a vendedora.", "error"); return; }
+    if (cartItems.length === 0) { pushToast("Adicione ao menos um produto.", "error"); return; }
+    for (const it of cartItems) {
+      const p = db.products.find((pp) => pp.id === it.productId);
+      if (!p || it.qty > p.stock) { pushToast(`Estoque insuficiente: ${it.productName}.`, "error"); return; }
+    }
+    const seller = sellerOf(form.sellerId);
+    const date = new Date(form.date).toISOString();
+    const items = cartItems.map((it) => ({ productId: it.productId, productName: it.productName, price: it.price, cost: it.cost, delivered: it.qty, sold: 0, returned: 0 }));
+    const record = { id: uid("cons"), sellerId: form.sellerId, sellerName: seller.name, date, items, period: Number(form.period) || 30, notes: form.notes, status: "aberto" };
+
+    const movements = cartItems.map((it) => {
+      const p = db.products.find((pp) => pp.id === it.productId);
+      return { id: uid("mov"), date, productId: it.productId, productName: it.productName, type: "saida-vendedora", qty: -it.qty, previous: p.stock, after: p.stock - it.qty, reason: `Saída para ${seller.name}`, user: "Fabi" };
+    });
+
+    updateDb((prev) => ({
+      ...prev,
+      consignments: [record, ...prev.consignments],
+      products: prev.products.map((p) => {
+        const it = cartItems.find((i) => i.productId === p.id);
+        return it ? { ...p, stock: p.stock - it.qty } : p;
+      }),
+      stockMovements: [...movements, ...prev.stockMovements],
+    }));
+    pushToast(`Saída registrada para ${seller.name}.`);
+    setModalOpen(false);
+  };
+
+  const openSettle = (c) => {
+    const init = {};
+    c.items.forEach((it) => { init[it.productId] = { sold: "0", returned: "0" }; });
+    setSettleQty(init);
+    setSettleModal(c);
+  };
+
+  const confirmSettle = () => {
+    const c = settleModal;
+    const itemsSold = [];
+    const itemsReturned = [];
+    for (const it of c.items) {
+      const q = settleQty[it.productId] || { sold: "0", returned: "0" };
+      const sold = Number(q.sold) || 0;
+      const returned = Number(q.returned) || 0;
+      const pending = pendingOf(it);
+      if (sold < 0 || returned < 0) { pushToast("Quantidades não podem ser negativas.", "error"); return; }
+      if (sold + returned > pending) { pushToast(`"${it.productName}": vendido + devolvido não pode passar do pendente (${pending}).`, "error"); return; }
+      if (sold > 0) itemsSold.push({ productId: it.productId, productName: it.productName, qty: sold, price: it.price, cost: it.cost });
+      if (returned > 0) itemsReturned.push({ productId: it.productId, productName: it.productName, qty: returned });
+    }
+    if (itemsSold.length === 0 && itemsReturned.length === 0) { pushToast("Informe ao menos uma quantidade vendida ou devolvida.", "error"); return; }
+
+    const seller = sellerOf(c.sellerId);
+    const totalSold = itemsSold.reduce((s, it) => s + it.price * it.qty, 0);
+    const totalCost = itemsSold.reduce((s, it) => s + it.cost * it.qty, 0);
+    const commissionPercent = seller.commissionPercent;
+    const commissionAmount = totalSold * (commissionPercent / 100);
+    const date = todayISO();
+    const settlement = {
+      id: uid("acerto"), number: nextGenericNumber(db.settlements), consignmentId: c.id, sellerId: c.sellerId, sellerName: seller.name,
+      date, itemsSold, itemsReturned, totalSold, totalCost, commissionPercent, commissionAmount, netToRepass: totalSold - commissionAmount,
+      repasseStatus: "pendente", repassePaidAt: null, repasseNote: "", status: "finalizado", createdBy: "Fabi",
+    };
+
+    const returnMovements = itemsReturned.map((it) => {
+      const p = db.products.find((pp) => pp.id === it.productId);
+      return { id: uid("mov"), date, productId: it.productId, productName: it.productName, type: "devolucao-vendedora", qty: it.qty, previous: p.stock, after: p.stock + it.qty, reason: `Devolução de ${seller.name}`, user: "Fabi" };
+    });
+
+    updateDb((prev) => ({
+      ...prev,
+      settlements: [settlement, ...prev.settlements],
+      consignments: prev.consignments.map((cons) => {
+        if (cons.id !== c.id) return cons;
+        const items = cons.items.map((it) => {
+          const q = settleQty[it.productId] || { sold: "0", returned: "0" };
+          return { ...it, sold: it.sold + (Number(q.sold) || 0), returned: it.returned + (Number(q.returned) || 0) };
+        });
+        const stillPending = items.reduce((s, it) => s + pendingOf(it), 0);
+        return { ...cons, items, status: stillPending === 0 ? "fechado" : "aberto" };
+      }),
+      products: prev.products.map((p) => {
+        const it = itemsReturned.find((i) => i.productId === p.id);
+        return it ? { ...p, stock: p.stock + it.qty } : p;
+      }),
+      stockMovements: [...returnMovements, ...prev.stockMovements],
+    }));
+    pushToast(`Acerto #${settlement.number} registrado.`);
+    setSettleModal(null);
+  };
+
+  const confirmRepasse = () => {
+    updateDb((prev) => ({
+      ...prev,
+      settlements: prev.settlements.map((s) => s.id === repasseModal.id ? { ...s, repasseStatus: "pago", repassePaidAt: new Date(repasseForm.date).toISOString(), repasseNote: repasseForm.note } : s),
+    }));
+    pushToast(`Repasse do acerto #${repasseModal.number} confirmado.`);
+    setRepasseModal(null);
+    setRepasseForm({ date: new Date().toISOString().slice(0, 10), note: "" });
+  };
+
+  const totalRepassarPendente = db.settlements.filter((s) => s.repasseStatus === "pendente").reduce((sum, s) => sum + s.netToRepass, 0);
+  const totalComissaoConsignacao = db.settlements.reduce((sum, s) => sum + s.commissionAmount, 0);
+  const totalVendidoConsignacao = db.settlements.reduce((sum, s) => sum + s.totalSold, 0);
+
+  return (
+    <div className="page">
+      <div className="page-header">
+        <div><p className="page-eyebrow">Vendedoras</p><h1 className="page-title">Consignação</h1></div>
+        {tab === "saidas" && <button className="btn-gold" onClick={openNew}><Plus size={16} /> Nova saída</button>}
+      </div>
+
+      <div className="tabs">
+        <button className={tab === "saidas" ? "tab-active" : ""} onClick={() => setTab("saidas")}><Repeat size={14} style={{ marginRight: 4 }} />Saídas para vendedoras</button>
+        <button className={tab === "acertos" ? "tab-active" : ""} onClick={() => setTab("acertos")}><ClipboardList size={14} style={{ marginRight: 4 }} />Acertos</button>
+      </div>
+
+      {tab === "saidas" ? (
+        <div className="card">
+          {db.consignments.length === 0 ? (
+            <EmptyState icon={Repeat} title="Nenhuma saída registrada" subtitle="Registre os produtos entregues a uma vendedora para vender fora da loja." actionLabel="Nova saída" onAction={openNew} />
+          ) : (
+            <div className="table-wrap">
+              <table className="table">
+                <thead><tr><th>Vendedora</th><th>Data</th><th>Itens entregues</th><th>Pendente</th><th>Status</th><th></th></tr></thead>
+                <tbody>
+                  {db.consignments.sort((a, b) => new Date(b.date) - new Date(a.date)).map((c) => {
+                    const totalDelivered = c.items.reduce((s, it) => s + it.delivered, 0);
+                    const pending = consignmentPending(c);
+                    return (
+                      <tr key={c.id}>
+                        <td>{c.sellerName}</td>
+                        <td>{fmtDate(c.date)}</td>
+                        <td>{totalDelivered} un.</td>
+                        <td>{pending} un.</td>
+                        <td><Badge tone={c.status === "fechado" ? "neutral" : "warn"}>{c.status === "fechado" ? "Fechada" : "Aberta"}</Badge></td>
+                        <td>{pending > 0 && <button className="btn-outline btn-sm" onClick={() => openSettle(c)}>Fazer acerto</button>}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
+          <div className="stat-grid stat-grid-3">
+            <StatCard icon={DollarSign} tone="forest" label="Total vendido (consignação)" value={money(totalVendidoConsignacao)} />
+            <StatCard icon={Percent} tone="gold" label="Comissão das vendedoras" value={money(totalComissaoConsignacao)} />
+            <StatCard icon={HandCoins} tone="warn" label="A repassar (pendente)" value={money(totalRepassarPendente)} />
+          </div>
+          <div className="card">
+            {db.settlements.length === 0 ? (
+              <EmptyState icon={ClipboardList} title="Nenhum acerto realizado ainda" />
+            ) : (
+              <div className="table-wrap">
+                <table className="table">
+                  <thead><tr><th>Nº</th><th>Vendedora</th><th>Data</th><th>Vendido</th><th>Comissão</th><th>A repassar</th><th>Status</th><th></th></tr></thead>
+                  <tbody>
+                    {db.settlements.sort((a, b) => new Date(b.date) - new Date(a.date)).map((s) => (
+                      <tr key={s.id}>
+                        <td>#{s.number}</td><td>{s.sellerName}</td><td>{fmtDate(s.date)}</td>
+                        <td>{money(s.totalSold)}</td><td className="text-gold-strong">{money(s.commissionAmount)}</td>
+                        <td className="text-forest-strong">{money(s.netToRepass)}</td>
+                        <td><Badge tone={s.repasseStatus === "pago" ? "success" : "warn"}>{s.repasseStatus === "pago" ? "Repassado" : "Pendente"}</Badge></td>
+                        <td>{s.repasseStatus === "pendente" && <button className="btn-gold btn-sm" onClick={() => setRepasseModal(s)}>Marcar repassado</button>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Nova saída para vendedora" wide>
+        <div className="form-grid">
+          <Field label="Vendedora" required>
+            <select value={form.sellerId} onChange={(e) => setForm((f) => ({ ...f, sellerId: e.target.value }))}>
+              <option value="">Selecione…</option>
+              {db.sellers.filter((s) => s.status === "ativa").map((s) => <option key={s.id} value={s.id}>{s.name} · {s.commissionPercent}%</option>)}
+            </select>
+          </Field>
+          <Field label="Data"><input type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} /></Field>
+          <Field label="Prazo do acerto (dias)"><input type="number" min="1" value={form.period} onChange={(e) => setForm((f) => ({ ...f, period: e.target.value }))} /></Field>
+        </div>
+        <Field label="Produtos" required>
+          <div className="inline-select-row">
+            <select value={pickProduct} onChange={(e) => setPickProduct(e.target.value)}>
+              <option value="">Selecione um produto…</option>
+              {db.products.filter((p) => p.status === "ativo").map((p) => <option key={p.id} value={p.id}>{p.name} · estoque {p.stock}</option>)}
+            </select>
+            <input type="number" min="1" style={{ maxWidth: 80 }} value={pickQty} onChange={(e) => setPickQty(e.target.value)} />
+            <button className="btn-outline btn-sm" onClick={addItem}><Plus size={14} /> Adicionar</button>
+          </div>
+        </Field>
+        {cartItems.length > 0 && (
+          <div className="table-wrap" style={{ marginBottom: 12 }}>
+            <table className="table">
+              <thead><tr><th>Produto</th><th>Qtd</th><th></th></tr></thead>
+              <tbody>
+                {cartItems.map((it) => (
+                  <tr key={it.productId}>
+                    <td>{it.productName}</td><td>{it.qty}</td>
+                    <td><button className="icon-btn icon-btn-danger" onClick={() => removeItem(it.productId)}><Trash2 size={14} /></button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <Field label="Observação" span><textarea rows={2} value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} /></Field>
+        <button className="btn-gold btn-block" onClick={save}>Registrar saída</button>
+      </Modal>
+
+      <Modal open={!!settleModal} onClose={() => setSettleModal(null)} title={settleModal ? `Fazer acerto — ${settleModal.sellerName}` : ""} wide>
+        {settleModal && (
+          <div>
+            <p className="cell-sub" style={{ marginBottom: 10 }}>Informe quanto foi vendido e quanto foi devolvido de cada produto pendente.</p>
+            <div className="table-wrap" style={{ marginBottom: 12 }}>
+              <table className="table">
+                <thead><tr><th>Produto</th><th>Pendente</th><th>Vendido</th><th>Devolvido</th></tr></thead>
+                <tbody>
+                  {settleModal.items.filter((it) => pendingOf(it) > 0).map((it) => (
+                    <tr key={it.productId}>
+                      <td>{it.productName}</td>
+                      <td>{pendingOf(it)}</td>
+                      <td><input type="number" min="0" style={{ maxWidth: 80 }} value={settleQty[it.productId]?.sold || "0"} onChange={(e) => setSettleQty((q) => ({ ...q, [it.productId]: { ...q[it.productId], sold: e.target.value } }))} /></td>
+                      <td><input type="number" min="0" style={{ maxWidth: 80 }} value={settleQty[it.productId]?.returned || "0"} onChange={(e) => setSettleQty((q) => ({ ...q, [it.productId]: { ...q[it.productId], returned: e.target.value } }))} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <button className="btn-gold btn-block" onClick={confirmSettle}>Confirmar acerto</button>
+          </div>
+        )}
+      </Modal>
+
+      <Modal open={!!repasseModal} onClose={() => setRepasseModal(null)} title="Confirmar repasse à loja">
+        {repasseModal && (
+          <div>
+            <p className="pay-summary">Acerto #{repasseModal.number} · {repasseModal.sellerName} · <strong>{money(repasseModal.netToRepass)}</strong></p>
+            <Field label="Data do repasse"><input type="date" value={repasseForm.date} onChange={(e) => setRepasseForm((f) => ({ ...f, date: e.target.value }))} /></Field>
+            <Field label="Observação"><textarea rows={2} value={repasseForm.note} onChange={(e) => setRepasseForm((f) => ({ ...f, note: e.target.value }))} /></Field>
+            <button className="btn-gold btn-block" onClick={confirmRepasse}>Confirmar repasse recebido</button>
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
+}
+
 /* ============================== GLOBAL STYLE ============================== */
 
 function GlobalStyle() {
@@ -2927,6 +3636,9 @@ function GlobalStyle() {
       .seller-name { font-weight: 700; font-size: 15px; margin: 0; color: var(--forest-900); }
       .seller-commission { font-size: 12px; color: var(--gold-600); font-weight: 600; margin: 2px 0 12px; }
       .seller-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; border-top: 1px solid var(--line); padding-top: 10px; }
+      .seller-cons-block { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
+      .seller-cons-title { display: flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; color: var(--gold-600); text-transform: uppercase; letter-spacing: 0.02em; margin: 0 0 8px; }
+      .seller-stats-6 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 6px; }
 
       .pay-summary { background: var(--cream); padding: 10px 12px; border-radius: 10px; font-size: 13px; margin-bottom: 12px; }
 
