@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { supabase, APP_STATE_ROW_ID } from "./supabaseClient";
 import {
   LayoutDashboard, ShoppingCart, Receipt as ReceiptIcon, Package, Users, UserRound, Percent,
   Search, Plus, Minus, X, Check, Printer, MessageCircle, TrendingUp, TrendingDown,
@@ -7,6 +8,7 @@ import {
   CalendarDays, Filter, Info, Sparkles, PackagePlus, History, Wallet, ChevronDown,
   ImagePlus, ImageOff, FileText, Download, ArrowDownCircle, ArrowUpCircle,
   Lock, ShieldCheck, Landmark, UserCog, LockOpen, Repeat, ClipboardList, Undo2, HandCoins,
+  Settings, ShieldAlert,
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, LineChart, Line,
@@ -33,6 +35,7 @@ const NAV_ITEMS = [
   { id: "comissoes", label: "Comissões", icon: Percent },
   { id: "financeiro", label: "Financeiro", icon: Landmark, adminOnly: true },
   { id: "relatorios", label: "Relatórios", icon: FileText, adminOnly: true },
+  { id: "configuracoes", label: "Configurações", icon: Settings, adminOnly: true },
 ];
 
 const FINANCE_CATEGORIES = {
@@ -147,6 +150,46 @@ function resizeImageFile(file, maxDim = 480, quality = 0.82) {
     };
     reader.readAsDataURL(file);
   });
+}
+
+// Redimensiona a imagem e devolve um arquivo (Blob) pronto para upload —
+// usado para fotos de produto, que ficam no Supabase Storage em vez de
+// embutidas como texto no banco (isso é o que mantém o salvamento rápido e confiável).
+function resizeImageToBlob(file, maxDim = 640, quality = 0.82) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Não foi possível ler a imagem."));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Arquivo de imagem inválido."));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > height && width > maxDim) { height = Math.round((height * maxDim) / width); width = maxDim; }
+        else if (height > maxDim) { width = Math.round((width * maxDim) / height); height = maxDim; }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#FFFFFF";
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        canvas.toBlob((blob) => {
+          if (!blob) { reject(new Error("Não foi possível processar a imagem.")); return; }
+          resolve(blob);
+        }, "image/jpeg", quality);
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadProductPhoto(file) {
+  const blob = await resizeImageToBlob(file);
+  const path = `products/${uid("photo")}.jpg`;
+  const { error: uploadError } = await supabase.storage.from("product-photos").upload(path, blob, { contentType: "image/jpeg", upsert: false });
+  if (uploadError) throw uploadError;
+  const { data } = supabase.storage.from("product-photos").getPublicUrl(path);
+  return data.publicUrl;
 }
 
 function csvEscape(value) {
@@ -437,6 +480,41 @@ function LoadingScreen() {
   );
 }
 
+function LoginScreen() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    setLoading(false);
+    if (error) setError("E-mail ou senha incorretos. Confira e tente novamente.");
+  };
+
+  return (
+    <div className="app-root login-page">
+      <GlobalStyle />
+      <form className="login-card" onSubmit={submit}>
+        <img src={LOGO_DATA_URL} alt="Fabi Cosméticos" className="login-logo" />
+        <h1 className="login-title">Entrar no sistema</h1>
+        <p className="login-subtitle">Gestão inteligente para o seu negócio</p>
+        <Field label="E-mail" required>
+          <input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} required />
+        </Field>
+        <Field label="Senha" required>
+          <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+        </Field>
+        {error && <p className="login-error">{error}</p>}
+        <button className="btn-gold btn-block btn-lg" type="submit" disabled={loading}>{loading ? "Entrando…" : "Entrar"}</button>
+      </form>
+    </div>
+  );
+}
+
 function Modal({ open, onClose, title, children, wide, noPadding }) {
   if (!open) return null;
   return (
@@ -543,7 +621,9 @@ function withDefaults(data) {
 }
 
 export default function FabiCosmeticosApp() {
-  const [loading, setLoading] = useState(true);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [session, setSession] = useState(null);
+  const [dbLoading, setDbLoading] = useState(true);
   const [db, setDb] = useState(null);
   const [role, setRole] = useState({ type: "admin" });
   const [section, setSection] = useState("dashboard");
@@ -551,6 +631,7 @@ export default function FabiCosmeticosApp() {
   const [toasts, setToasts] = useState([]);
   const [confirm, setConfirm] = useState({ open: false });
   const saveTimer = useRef(null);
+  const lastSyncedRef = useRef(null);
 
   const pushToast = useCallback((message, type = "success") => {
     const id = uid("toast");
@@ -570,46 +651,133 @@ export default function FabiCosmeticosApp() {
     window.storage.set(ROLE_STORAGE_KEY, JSON.stringify(next), false).catch(() => {});
   }, []);
 
-  // ---- load ----
+  // ---- autenticação ----
   useEffect(() => {
-    (async () => {
-      try {
-        const res = await window.storage.get(STORAGE_KEY, false);
-        if (res?.value) setDb(withDefaults(JSON.parse(res.value)));
-        else {
-          const seed = buildSeed();
-          setDb(seed);
-          await window.storage.set(STORAGE_KEY, JSON.stringify(seed), false);
-        }
-      } catch (e) {
-        const seed = buildSeed();
-        setDb(seed);
-        try { await window.storage.set(STORAGE_KEY, JSON.stringify(seed), false); } catch (_) {}
-      }
-      try {
-        const roleRes = await window.storage.get(ROLE_STORAGE_KEY, false);
-        if (roleRes?.value) setRole(JSON.parse(roleRes.value));
-      } catch (_) {}
-      setLoading(false);
-    })();
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session || null);
+      setAuthChecked(true);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession || null);
+      if (!newSession) { setDb(null); lastSyncedRef.current = null; }
+    });
+    return () => sub.subscription.unsubscribe();
   }, []);
 
-  // ---- persist (debounced) ----
+  // ---- carregar dados do banco (Supabase) quando autenticado ----
   useEffect(() => {
-    if (!db) return;
+    if (!session) return;
+    let cancelled = false;
+    setDbLoading(true);
+    (async () => {
+      try {
+        const { data, error } = await supabase.from("app_state").select("data").eq("id", APP_STATE_ROW_ID).maybeSingle();
+        if (cancelled) return;
+        if (error) throw error;
+        if (data?.data) {
+          lastSyncedRef.current = JSON.stringify(data.data);
+          setDb(withDefaults(data.data));
+        } else {
+          const seed = buildSeed();
+          const { error: insertError } = await supabase.from("app_state").insert({ id: APP_STATE_ROW_ID, data: seed });
+          if (insertError) throw insertError;
+          lastSyncedRef.current = JSON.stringify(seed);
+          setDb(seed);
+        }
+      } catch (e) {
+        pushToast("Não foi possível carregar os dados do banco. Verifique sua conexão.", "error");
+      } finally {
+        if (!cancelled) setDbLoading(false);
+      }
+    })();
+    try {
+      window.storage.get(ROLE_STORAGE_KEY, false).then((roleRes) => {
+        if (roleRes?.value) setRole(JSON.parse(roleRes.value));
+      }).catch(() => {});
+    } catch (_) {}
+    return () => { cancelled = true; };
+  }, [session, pushToast]);
+
+  // ---- sincronização em tempo real entre dispositivos/abas ----
+  useEffect(() => {
+    if (!session) return;
+    const channel = supabase
+      .channel("app_state_sync")
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "app_state", filter: `id=eq.${APP_STATE_ROW_ID}` }, (payload) => {
+        const incoming = payload.new?.data;
+        if (!incoming) return;
+        const serialized = JSON.stringify(incoming);
+        if (serialized === lastSyncedRef.current) return;
+        lastSyncedRef.current = serialized;
+        setDb(withDefaults(incoming));
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [session]);
+
+  // ---- gravar no banco (debounced, à prova de corrida entre salvamentos, com nova tentativa automática) ----
+  const dbRef = useRef(db);
+  dbRef.current = db;
+  const savingRef = useRef(false);
+  const resaveNeededRef = useRef(false);
+  const retryTimerRef = useRef(null);
+  const [syncStatus, setSyncStatus] = useState("ok"); // "ok" | "saving" | "error"
+
+  const persistNow = useCallback(async () => {
+    if (savingRef.current) { resaveNeededRef.current = true; return; }
+    if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null; }
+    savingRef.current = true;
+    let failed = false;
+    try {
+      let current = dbRef.current;
+      let serialized = JSON.stringify(current);
+      while (serialized !== lastSyncedRef.current) {
+        setSyncStatus("saving");
+        const toSave = current;
+        const toSaveSerialized = serialized;
+        const { error } = await supabase.from("app_state").update({ data: toSave, updated_at: new Date().toISOString() }).eq("id", APP_STATE_ROW_ID);
+        if (error) {
+          failed = true;
+          pushToast("Não foi possível salvar os dados agora. Vamos tentar de novo automaticamente.", "error");
+          break;
+        }
+        lastSyncedRef.current = toSaveSerialized;
+        current = dbRef.current;
+        serialized = JSON.stringify(current);
+      }
+    } finally {
+      savingRef.current = false;
+      if (failed) {
+        setSyncStatus("error");
+        retryTimerRef.current = setTimeout(() => { persistNow(); }, 5000);
+      } else {
+        setSyncStatus("ok");
+        if (resaveNeededRef.current) { resaveNeededRef.current = false; persistNow(); }
+      }
+    }
+  }, [pushToast]);
+
+  useEffect(() => {
+    if (!db || !session) return;
+    if (JSON.stringify(db) === lastSyncedRef.current) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      try { await window.storage.set(STORAGE_KEY, JSON.stringify(db), false); }
-      catch (e) { pushToast("Não foi possível salvar os dados agora.", "error"); }
-    }, 350);
+    saveTimer.current = setTimeout(() => { persistNow(); }, 500);
     return () => clearTimeout(saveTimer.current);
-  }, [db, pushToast]);
+  }, [db, session, persistNow]);
+
+  useEffect(() => () => { if (retryTimerRef.current) clearTimeout(retryTimerRef.current); }, []);
 
   const updateDb = useCallback((updater) => {
     setDb((prev) => (typeof updater === "function" ? updater(prev) : { ...prev, ...updater }));
   }, []);
 
-  if (loading || !db) return <LoadingScreen />;
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+  };
+
+  if (!authChecked) return <LoadingScreen />;
+  if (!session) return <LoginScreen />;
+  if (dbLoading || !db) return <LoadingScreen />;
 
   const isAdmin = role.type === "admin";
   const visibleNavItems = NAV_ITEMS.filter((n) => isAdmin || !n.adminOnly);
@@ -644,6 +812,10 @@ export default function FabiCosmeticosApp() {
           ))}
         </nav>
         <RoleSwitcher db={db} role={role} onChange={changeRole} />
+        <SyncStatusBadge status={syncStatus} />
+        <button className="logout-btn" onClick={handleLogout} title="Sair da conta">
+          <LockOpen size={13} /> Sair {session?.user?.email ? `(${session.user.email})` : ""}
+        </button>
         <div className="sidebar-footer">
           <p>Feito com carinho para a</p>
           <p className="sidebar-footer-brand">Fabi Cosméticos ✦</p>
@@ -681,6 +853,8 @@ export default function FabiCosmeticosApp() {
               </button>
             ))}
             <RoleSwitcher db={db} role={role} onChange={(r) => { changeRole(r); setMobileNavOpen(false); }} />
+            <SyncStatusBadge status={syncStatus} />
+            <button className="logout-btn" onClick={handleLogout}><LockOpen size={13} /> Sair</button>
           </div>
         </div>
       )}
@@ -698,7 +872,22 @@ export default function FabiCosmeticosApp() {
         {section === "comissoes" && <Comissoes db={db} role={role} updateDb={updateDb} pushToast={pushToast} />}
         {section === "financeiro" && isAdmin && <Financeiro db={db} updateDb={updateDb} pushToast={pushToast} askConfirm={askConfirm} />}
         {section === "relatorios" && isAdmin && <Relatorios db={db} />}
+        {section === "configuracoes" && isAdmin && <Configuracoes db={db} updateDb={updateDb} pushToast={pushToast} changeRole={changeRole} />}
       </main>
+    </div>
+  );
+}
+
+function SyncStatusBadge({ status }) {
+  const config = {
+    ok: { icon: Check, label: "Sincronizado", cls: "sync-ok" },
+    saving: { icon: Repeat, label: "Salvando…", cls: "sync-saving" },
+    error: { icon: AlertTriangle, label: "Sem conexão — tentando de novo", cls: "sync-error" },
+  }[status] || { icon: Check, label: "Sincronizado", cls: "sync-ok" };
+  const Icon = config.icon;
+  return (
+    <div className={`sync-badge ${config.cls}`}>
+      <Icon size={12} /> <span>{config.label}</span>
     </div>
   );
 }
@@ -757,18 +946,32 @@ function Dashboard({ db, role, setSection }) {
   const baseSales = isAdmin ? db.sales : db.sales.filter((s) => s.sellerId === role.sellerId);
   const activeSales = baseSales.filter((s) => s.status !== "cancelada");
 
-  const inRange = activeSales.filter((s) => {
+  const basePrazo = isAdmin ? db.installmentSales : db.installmentSales.filter((s) => s.sellerId === role.sellerId);
+  const baseSettlements = isAdmin ? db.settlements : db.settlements.filter((s) => s.sellerId === role.sellerId);
+  const normalizedPrazo = basePrazo.map((ps) => ({ date: ps.date, total: ps.totalAmount, profit: ps.totalAmount - (ps.totalCost || 0), items: ps.items }));
+  const normalizedSettlements = baseSettlements.map((st) => ({ date: st.date, total: st.totalSold, profit: st.totalSold - (st.totalCost || 0), items: st.itemsSold }));
+
+  // Todas as vendas (PDV + a prazo + acertos de consignação) juntas, para faturamento/lucro/produtos/gráfico
+  const allRevenueEvents = [
+    ...activeSales.map((s) => ({ date: s.date, total: s.total, profit: s.profit, items: s.items })),
+    ...normalizedPrazo,
+    ...normalizedSettlements,
+  ];
+
+  const inRange = allRevenueEvents.filter((s) => {
     const d = new Date(s.date);
     return d >= rStart && d <= rEnd;
   });
 
   const [tStart, tEnd] = dateRangeForPeriod("hoje");
-  const todaySales = activeSales.filter((s) => { const d = new Date(s.date); return d >= tStart && d <= tEnd; });
+  const todaySales = allRevenueEvents.filter((s) => { const d = new Date(s.date); return d >= tStart && d <= tEnd; });
+
+  const inRangeSales = activeSales.filter((s) => { const d = new Date(s.date); return d >= rStart && d <= rEnd; });
 
   const faturamento = inRange.reduce((sum, s) => sum + s.total, 0);
   const lucro = inRange.reduce((sum, s) => sum + s.profit, 0);
   const unidadesVendidas = inRange.reduce((sum, s) => sum + s.items.reduce((a, it) => a + it.qty, 0), 0);
-  const comissaoGerada = inRange.reduce((sum, s) => sum + s.commissionAmount, 0);
+  const comissaoGerada = inRangeSales.reduce((sum, s) => sum + s.commissionAmount, 0);
   const lowStock = db.products.filter((p) => p.status === "ativo" && p.stock <= p.minStock);
   const photoOf = (id) => db.products.find((p) => p.id === id)?.photo;
 
@@ -791,7 +994,7 @@ function Dashboard({ db, role, setSection }) {
         if (!map[it.productId]) map[it.productId] = { productId: it.productId, name: it.productName, qty: 0, revenue: 0, profit: 0 };
         map[it.productId].qty += it.qty;
         map[it.productId].revenue += it.price * it.qty;
-        map[it.productId].profit += (it.price - it.cost) * it.qty;
+        map[it.productId].profit += (it.price - (it.cost || 0)) * it.qty;
       });
     });
     return Object.values(map).sort((a, b) => b.qty - a.qty).slice(0, 5);
@@ -914,10 +1117,14 @@ function Pdv({ db, role, updateDb, pushToast }) {
   const [quickCustomerOpen, setQuickCustomerOpen] = useState(false);
   const [quickCustomer, setQuickCustomer] = useState({ name: "", phone: "" });
   const [successSale, setSuccessSale] = useState(null);
+  const [successPrazoSale, setSuccessPrazoSale] = useState(null);
   const [whatsappSale, setWhatsappSale] = useState(null);
   const [whatsappPhone, setWhatsappPhone] = useState("");
   const [printFormatOpen, setPrintFormatOpen] = useState(false);
   const [receiptFormat, setReceiptFormat] = useState("a4");
+  const [prazoComEntrada, setPrazoComEntrada] = useState(false);
+  const [prazoEntradaValue, setPrazoEntradaValue] = useState("");
+  const [printChoice, setPrintChoice] = useState("comprovante");
 
   useEffect(() => {
     if (!isAdmin) setSellerId(role.sellerId);
@@ -969,7 +1176,7 @@ function Pdv({ db, role, updateDb, pushToast }) {
 
   const resetSale = () => {
     setCart([]); setCustomerId(""); setPayment("dinheiro"); setCashReceived("");
-    setDiscountType("percent"); setDiscountValue(0);
+    setDiscountType("percent"); setDiscountValue(0); setPrazoComEntrada(false); setPrazoEntradaValue("");
   };
 
   const addQuickCustomer = () => {
@@ -986,20 +1193,54 @@ function Pdv({ db, role, updateDb, pushToast }) {
     if (cartLines.length === 0) { pushToast("Adicione ao menos um produto ao carrinho.", "error"); return; }
     if (!sellerId) { pushToast("Selecione a vendedora responsável.", "error"); return; }
     if (payment === "dinheiro" && (Number(cashReceived) || 0) < total) { pushToast("Valor recebido é menor que o total da venda.", "error"); return; }
+    if (payment === "prazo" && !customerId) { pushToast("Selecione o cliente para uma venda a prazo.", "error"); return; }
+    const entradaValue = Number(prazoEntradaValue) || 0;
+    if (payment === "prazo" && prazoComEntrada && entradaValue > total) { pushToast("O valor da entrada não pode ser maior que o total da venda.", "error"); return; }
     for (const l of cartLines) {
       if (l.qty > l.product.stock) { pushToast(`Estoque insuficiente: ${l.product.name}. Disponível: ${l.product.stock}, solicitado: ${l.qty}.`, "error"); return; }
     }
 
     const seller = db.sellers.find((s) => s.id === sellerId);
     const totalCost = cartLines.reduce((sum, l) => sum + l.product.cost * l.qty, 0);
-    const profit = total - totalCost;
-    const number = nextSaleNumber(db.sales);
     const date = todayISO();
-    const saleId = uid("sale");
 
     const items = cartLines.map((l) => ({
       productId: l.product.id, productName: l.product.name, sku: l.product.sku, qty: l.qty, price: l.product.price, cost: l.product.cost,
     }));
+
+    if (payment === "prazo") {
+      const entrada = prazoComEntrada ? entradaValue : 0;
+      const number = nextGenericNumber(db.installmentSales);
+      const id = uid("prazo");
+      const payments = entrada > 0 ? [{ id: uid("pgto"), date, amount: entrada, method: "dinheiro", note: "Entrada no PDV", user: "Fabi" }] : [];
+      const record = {
+        id, number, date, customerId, sellerId, sellerName: seller.name,
+        items, subtotal, discountType, discountValue: Number(discountValue) || 0, discountAmount, totalAmount: total, totalCost,
+        payment: "prazo", payments, dueDate: null, notes: "",
+        status: entrada >= total && total > 0 ? "pago" : entrada > 0 ? "parcial" : "aberto", createdBy: "Fabi",
+      };
+      const movements = items.map((it) => {
+        const p = db.products.find((pp) => pp.id === it.productId);
+        return { id: uid("mov"), date, productId: it.productId, productName: it.productName, type: "venda-prazo", qty: -it.qty, previous: p.stock, after: p.stock - it.qty, reason: `Venda a prazo #${number}`, user: seller.name };
+      });
+      updateDb((prev) => ({
+        ...prev,
+        installmentSales: [record, ...prev.installmentSales],
+        products: prev.products.map((p) => {
+          const line = cartLines.find((l) => l.product.id === p.id);
+          return line ? { ...p, stock: p.stock - line.qty } : p;
+        }),
+        stockMovements: [...movements, ...prev.stockMovements],
+      }));
+      pushToast(`Venda a prazo #${number} registrada!`);
+      setSuccessPrazoSale(record);
+      resetSale();
+      return;
+    }
+
+    const profit = total - totalCost;
+    const number = nextSaleNumber(db.sales);
+    const saleId = uid("sale");
 
     const newSale = {
       id: saleId, number, date, customerId: customerId || null, sellerId, sellerName: seller.name,
@@ -1142,6 +1383,9 @@ function Pdv({ db, role, updateDb, pushToast }) {
                   <m.icon size={16} /> <span>{m.label}</span>
                 </button>
               ))}
+              <button className={`payment-option ${payment === "prazo" ? "payment-option-active" : ""}`} onClick={() => setPayment("prazo")}>
+                <CreditCard size={16} /> <span>A Prazo</span>
+              </button>
             </div>
           </Field>
 
@@ -1153,6 +1397,25 @@ function Pdv({ db, role, updateDb, pushToast }) {
               <Field label="Troco">
                 <div className="troco-display">{money(troco)}</div>
               </Field>
+            </div>
+          )}
+
+          {payment === "prazo" && (
+            <div className="prazo-block">
+              <div className="segmented" style={{ width: "100%", marginBottom: 10 }}>
+                <button style={{ flex: 1 }} className={!prazoComEntrada ? "seg-active" : ""} onClick={() => setPrazoComEntrada(false)}>Sem entrada</button>
+                <button style={{ flex: 1 }} className={prazoComEntrada ? "seg-active" : ""} onClick={() => setPrazoComEntrada(true)}>Com entrada</button>
+              </div>
+              {prazoComEntrada && (
+                <Field label="Valor da entrada">
+                  <input type="number" min="0" max={total} step="0.01" value={prazoEntradaValue} onChange={(e) => setPrazoEntradaValue(e.target.value)} placeholder="0,00" />
+                </Field>
+              )}
+              <div className="totals-block" style={{ marginTop: prazoComEntrada ? 0 : 10 }}>
+                <div className="totals-row"><span>Entrada</span><span>{money(prazoComEntrada ? (Number(prazoEntradaValue) || 0) : 0)}</span></div>
+                <div className="totals-row totals-total"><span>Saldo devedor</span><span>{money(Math.max(total - (prazoComEntrada ? (Number(prazoEntradaValue) || 0) : 0), 0))}</span></div>
+              </div>
+              {!customerId && <p className="cancel-note"><AlertTriangle size={14} /> Selecione um cliente acima para vender a prazo.</p>}
             </div>
           )}
 
@@ -1194,6 +1457,38 @@ function Pdv({ db, role, updateDb, pushToast }) {
         onClose={() => setPrintFormatOpen(false)}
         onConfirm={(format) => { setReceiptFormat(format); setPrintFormatOpen(false); triggerPrint(format); }}
       />
+
+      <Modal open={!!successPrazoSale} onClose={() => setSuccessPrazoSale(null)} title="Venda a prazo registrada!">
+        {successPrazoSale && (() => {
+          const paid = successPrazoSale.payments.reduce((s, p) => s + p.amount, 0);
+          const saldo = successPrazoSale.totalAmount - paid;
+          const statusLabel = { aberto: "Em aberto", parcial: "Parcialmente pago", pago: "Pago" };
+          const receiptLikeSale = {
+            number: successPrazoSale.number, date: successPrazoSale.date, items: successPrazoSale.items,
+            subtotal: successPrazoSale.subtotal, discountAmount: successPrazoSale.discountAmount,
+            total: successPrazoSale.totalAmount, payment: "prazo", cashReceived: null, sellerName: successPrazoSale.sellerName,
+          };
+          return (
+            <div>
+              <div className="success-banner"><Check size={20} /> Venda a prazo #{successPrazoSale.number} registrada</div>
+              <div className="success-grid">
+                <div><p className="success-label">Cliente</p><p className="success-value">{customerOf(successPrazoSale.customerId)?.name}</p></div>
+                <div><p className="success-label">Total da venda</p><p className="success-value">{money(successPrazoSale.totalAmount)}</p></div>
+                <div><p className="success-label">Entrada</p><p className="success-value">{money(paid)}</p></div>
+                <div><p className="success-label">Saldo devedor</p><p className="success-value" style={{ color: saldo > 0 ? "var(--danger)" : "inherit" }}>{money(saldo)}</p></div>
+                <div><p className="success-label">Status</p><p className="success-value"><Badge tone={successPrazoSale.status === "pago" ? "success" : "warn"}>{statusLabel[successPrazoSale.status]}</Badge></p></div>
+              </div>
+              <div className="success-actions">
+                <button className="btn-outline" onClick={() => { setPrintChoice("carne"); triggerPrint("a4"); }}><ClipboardList size={16} /> Imprimir Carnê</button>
+                <button className="btn-outline" onClick={() => { setPrintChoice("comprovante"); setPrintFormatOpen(true); }}><Printer size={16} /> Imprimir Comprovante</button>
+                <button className="btn-gold" onClick={() => setSuccessPrazoSale(null)}>Nova venda</button>
+              </div>
+              <Receipt sale={receiptLikeSale} customer={customerOf(successPrazoSale.customerId)} settings={db.settings} format={receiptFormat} printTarget={printChoice === "comprovante"} />
+              <Carne installmentSale={successPrazoSale} customer={customerOf(successPrazoSale.customerId)} settings={db.settings} printTarget={printChoice === "carne"} />
+            </div>
+          );
+        })()}
+      </Modal>
 
       <WhatsappModal sale={whatsappSale} settings={db.settings} phone={whatsappPhone} setPhone={setWhatsappPhone} onClose={() => setWhatsappSale(null)} />
     </div>
@@ -1249,11 +1544,12 @@ function PrintFormatModal({ open, onClose, onConfirm }) {
 
 /* ============================== RECEIPT / WHATSAPP ============================== */
 
-function Receipt({ sale, customer, settings, format = "a4" }) {
+function Receipt({ sale, customer, settings, format = "a4", printTarget = true }) {
   if (!sale) return null;
   const isDefaultBrand = !settings?.companyName || settings.companyName === "Fabi Cosméticos";
+  const paymentLabel = PAYMENT_METHODS.find((m) => m.id === sale.payment)?.label || (sale.payment === "prazo" ? "A prazo" : sale.payment);
   return (
-    <div className={`receipt receipt-format-${format}`}>
+    <div className={`receipt receipt-format-${format} ${printTarget ? "print-target" : ""}`}>
       {isDefaultBrand ? (
         <img src={LOGO_DATA_URL} alt="Fabi Cosméticos" className="receipt-logo" />
       ) : (
@@ -1265,7 +1561,7 @@ function Receipt({ sale, customer, settings, format = "a4" }) {
         <span>Venda</span><span>#{sale.number}</span>
       </div>
       <div className="receipt-meta"><span>Data</span><span>{fmtDateTime(sale.date)}</span></div>
-      <div className="receipt-meta"><span>Vendedora</span><span>{sale.sellerName}</span></div>
+      {sale.sellerName && <div className="receipt-meta"><span>Vendedora</span><span>{sale.sellerName}</span></div>}
       <div className="receipt-meta"><span>Cliente</span><span>{customer?.name || "Não identificado"}</span></div>
       <div className="receipt-line" />
       <table className="receipt-table">
@@ -1280,12 +1576,73 @@ function Receipt({ sale, customer, settings, format = "a4" }) {
       <div className="receipt-meta"><span>Subtotal</span><span>{money(sale.subtotal)}</span></div>
       <div className="receipt-meta"><span>Desconto</span><span>− {money(sale.discountAmount)}</span></div>
       <div className="receipt-meta receipt-total"><span>Total</span><span>{money(sale.total)}</span></div>
-      <div className="receipt-meta"><span>Pagamento</span><span>{PAYMENT_METHODS.find((m) => m.id === sale.payment)?.label}</span></div>
+      <div className="receipt-meta"><span>Pagamento</span><span>{paymentLabel}</span></div>
       {sale.payment === "dinheiro" && sale.cashReceived != null && (
         <div className="receipt-meta"><span>Troco</span><span>{money(Math.max(sale.cashReceived - sale.total, 0))}</span></div>
       )}
       <div className="receipt-line" />
       <p className="receipt-thanks">{settings?.receiptMessage || "Obrigado pela preferência!"}</p>
+    </div>
+  );
+}
+
+function Carne({ installmentSale, customer, settings, printTarget = true }) {
+  if (!installmentSale) return null;
+  const paid = installmentSale.payments.reduce((s, p) => s + p.amount, 0);
+  const saldo = installmentSale.totalAmount - paid;
+  const isDefaultBrand = !settings?.companyName || settings.companyName === "Fabi Cosméticos";
+  const statusLabel = { aberto: "Em aberto", parcial: "Parcialmente pago", pago: "Quitado" };
+  let running = installmentSale.totalAmount;
+  return (
+    <div className={`receipt receipt-format-a4 ${printTarget ? "print-target" : ""}`}>
+      {isDefaultBrand ? (
+        <img src={LOGO_DATA_URL} alt="Fabi Cosméticos" className="receipt-logo" />
+      ) : (
+        <p className="receipt-brand">{settings.companyName}</p>
+      )}
+      <p className="receipt-sub">Carnê / Controle de Pagamento</p>
+      <div className="receipt-line" />
+      <div className="receipt-meta"><span>Cliente</span><span>{customer?.name || "—"}</span></div>
+      <div className="receipt-meta"><span>Data da venda</span><span>{fmtDate(installmentSale.date)}</span></div>
+      <div className="receipt-meta"><span>Venda</span><span>#{installmentSale.number}</span></div>
+      <div className="receipt-line" />
+      <table className="receipt-table">
+        <thead><tr><th>Produto</th><th>Qtd</th><th>Valor</th></tr></thead>
+        <tbody>
+          {installmentSale.items.map((it, i) => (
+            <tr key={i}><td>{it.productName}</td><td>{it.qty}</td><td>{money(it.price * it.qty)}</td></tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="receipt-line" />
+      <div className="receipt-meta receipt-total"><span>Valor total</span><span>{money(installmentSale.totalAmount)}</span></div>
+      <div className="receipt-meta"><span>Total pago</span><span>{money(paid)}</span></div>
+      <div className="receipt-meta receipt-total"><span>Saldo devedor</span><span>{money(saldo)}</span></div>
+      <div className="receipt-meta"><span>Status</span><span>{statusLabel[installmentSale.status]}</span></div>
+      <div className="receipt-line" />
+      <p className="carne-history-title">Histórico de pagamentos</p>
+      {installmentSale.payments.length === 0 ? (
+        <p className="carne-empty">Nenhum pagamento registrado ainda.</p>
+      ) : (
+        <table className="receipt-table">
+          <thead><tr><th>Data</th><th>Pagamento</th><th>Saldo</th></tr></thead>
+          <tbody>
+            {installmentSale.payments.map((p, i) => {
+              running -= p.amount;
+              return <tr key={i}><td>{fmtDate(p.date)}</td><td>{money(p.amount)}</td><td>{money(Math.max(running, 0))}</td></tr>;
+            })}
+          </tbody>
+        </table>
+      )}
+      {Array.from({ length: 3 }).map((_, i) => (
+        <div key={i} className="carne-blank-row"><span>____/____/______</span><span>R$ ____________</span><span>R$ ____________</span></div>
+      ))}
+      <div className="receipt-line" />
+      {saldo <= 0 ? (
+        <p className="carne-quitado">PAGAMENTO QUITADO</p>
+      ) : (
+        <p className="receipt-thanks">{settings?.receiptMessage || "Obrigado pela preferência!"}</p>
+      )}
     </div>
   );
 }
@@ -1510,6 +1867,7 @@ function Produtos({ db, role, updateDb, pushToast, askConfirm }) {
   const [form, setForm] = useState(emptyProduct);
   const [newCategory, setNewCategory] = useState("");
   const [photoUploading, setPhotoUploading] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const onPhotoSelected = async (e) => {
     const file = e.target.files?.[0];
@@ -1518,10 +1876,10 @@ function Produtos({ db, role, updateDb, pushToast, askConfirm }) {
     if (!file.type.startsWith("image/")) { pushToast("Selecione um arquivo de imagem.", "error"); return; }
     setPhotoUploading(true);
     try {
-      const dataUrl = await resizeImageFile(file);
-      setForm((f) => ({ ...f, photo: dataUrl }));
+      const publicUrl = await uploadProductPhoto(file);
+      setForm((f) => ({ ...f, photo: publicUrl }));
     } catch (err) {
-      pushToast("Não foi possível carregar essa imagem.", "error");
+      pushToast("Não foi possível enviar essa imagem. Verifique sua conexão e tente novamente.", "error");
     } finally {
       setPhotoUploading(false);
     }
@@ -1543,6 +1901,8 @@ function Produtos({ db, role, updateDb, pushToast, askConfirm }) {
   const marginPct = cost > 0 ? (profitUnit / cost) * 100 : 0;
 
   const save = () => {
+    if (saving) return;
+    if (photoUploading) { pushToast("Aguarde a foto terminar de enviar antes de salvar.", "error"); return; }
     if (!form.name.trim() || !form.sku.trim() || !form.category || !form.price) { pushToast("Preencha nome, código, categoria e preço de venda.", "error"); return; }
     let categories = db.categories;
     let category = form.category;
@@ -1551,17 +1911,27 @@ function Produtos({ db, role, updateDb, pushToast, askConfirm }) {
       category = newCategory.trim();
       if (!categories.includes(category)) categories = [...categories, category];
     }
+    setSaving(true);
     const payload = { ...form, category, cost, price, stock: Number(form.stock) || 0, minStock: Number(form.minStock) || 0 };
+    const isNew = !editingId;
+    const newId = isNew ? uid("prod") : editingId;
     updateDb((prev) => ({
       ...prev,
       categories,
       products: editingId
         ? prev.products.map((p) => p.id === editingId ? { ...p, ...payload } : p)
-        : [{ ...payload, id: uid("prod") }, ...prev.products],
+        : [{ ...payload, id: newId }, ...prev.products],
     }));
+    if (isNew) {
+      // Garante que o produto recém-criado sempre apareça na lista,
+      // mesmo que houvesse uma busca ou filtro de categoria diferente ativo.
+      setSearch("");
+      setCategoryFilter("");
+    }
     pushToast(editingId ? "Produto atualizado." : "Produto cadastrado.");
     setModalOpen(false);
     setNewCategory("");
+    setSaving(false);
   };
 
   const remove = (p) => {
@@ -1675,7 +2045,9 @@ function Produtos({ db, role, updateDb, pushToast, askConfirm }) {
             <p>Margem: <strong>{cost > 0 ? `${marginPct.toFixed(1)}%` : "—"}</strong></p>
           </div>
         </div>
-        <button className="btn-gold btn-block" onClick={save}>{editingId ? "Salvar alterações" : "Cadastrar produto"}</button>
+        <button className="btn-gold btn-block" onClick={save} disabled={saving || photoUploading}>
+          {photoUploading ? "Enviando foto…" : saving ? "Salvando…" : editingId ? "Salvar alterações" : "Cadastrar produto"}
+        </button>
       </Modal>
     </div>
   );
@@ -2216,8 +2588,22 @@ function buildLedger(db) {
       description: `Venda #${s.number} · ${s.sellerName}`, amount: s.total,
       method: s.payment, registerId: null, source: "venda",
     }));
+  const prazoEntries = db.installmentSales.flatMap((ps) =>
+    ps.payments.map((p) => ({
+      id: `prazo-${ps.id}-${p.id}`, date: p.date, type: "entrada", category: "venda-prazo",
+      description: `Venda a prazo #${ps.number}${p.note ? ` · ${p.note}` : ""}`, amount: p.amount,
+      method: p.method, registerId: null, source: "venda-prazo",
+    }))
+  );
+  const repasseEntries = db.settlements
+    .filter((st) => st.repasseStatus === "pago")
+    .map((st) => ({
+      id: `repasse-${st.id}`, date: st.repassePaidAt || st.date, type: "entrada", category: "repasse-consignacao",
+      description: `Repasse de ${st.sellerName} · Acerto #${st.number}`, amount: st.netToRepass,
+      method: null, registerId: null, source: "repasse-consignacao",
+    }));
   const manual = db.financeTransactions.map((t) => ({ ...t, source: "manual" }));
-  return [...salesEntries, ...manual].sort((a, b) => new Date(b.date) - new Date(a.date));
+  return [...salesEntries, ...prazoEntries, ...repasseEntries, ...manual].sort((a, b) => new Date(b.date) - new Date(a.date));
 }
 
 function Financeiro({ db, updateDb, pushToast, askConfirm }) {
@@ -2757,7 +3143,12 @@ function PagamentosPrazo({ db, updateDb, pushToast, askConfirm }) {
 
   const filtered = db.installmentSales.filter((s) => {
     const q = search.trim().toLowerCase();
-    const matchesSearch = !q || (customerOf(s.customerId)?.name || "").toLowerCase().includes(q) || String(s.number).includes(q);
+    const cust = customerOf(s.customerId);
+    const matchesSearch = !q
+      || (cust?.name || "").toLowerCase().includes(q)
+      || (cust?.phone || "").includes(q)
+      || (cust?.cpf || "").includes(q)
+      || String(s.number).includes(q);
     const matchesStatus = !statusFilter || s.status === statusFilter;
     return matchesSearch && matchesStatus;
   }).sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -2778,7 +3169,7 @@ function PagamentosPrazo({ db, updateDb, pushToast, askConfirm }) {
     setCartItems((prev) => {
       const found = prev.find((i) => i.productId === product.id);
       if (found) return prev.map((i) => i.productId === product.id ? { ...i, qty: i.qty + qty } : i);
-      return [...prev, { productId: product.id, productName: product.name, qty, price: product.price }];
+      return [...prev, { productId: product.id, productName: product.name, qty, price: product.price, cost: product.cost }];
     });
     setPickProduct(""); setPickQty("1");
   };
@@ -2802,9 +3193,10 @@ function PagamentosPrazo({ db, updateDb, pushToast, askConfirm }) {
     const number = nextGenericNumber(db.installmentSales);
     const date = new Date(form.date).toISOString();
     const id = uid("prazo");
+    const totalCost = cartItems.reduce((s, i) => s + (i.cost || 0) * i.qty, 0);
     const payments = initial > 0 ? [{ id: uid("pgto"), date, amount: initial, method: form.initialMethod, note: "Pagamento inicial", user: "Fabi" }] : [];
     const record = {
-      id, number, date, customerId: form.customerId, items: cartItems, totalAmount: cartTotal,
+      id, number, date, customerId: form.customerId, items: cartItems, totalAmount: cartTotal, totalCost,
       dueDate: form.dueDate || null, notes: form.notes, payments,
       status: initial >= cartTotal ? "pago" : initial > 0 ? "parcial" : "aberto", createdBy: "Fabi",
     };
@@ -2975,6 +3367,7 @@ function PagamentosPrazo({ db, updateDb, pushToast, askConfirm }) {
                 <div><p className="success-label">Total</p><p className="success-value">{money(detail.totalAmount)}</p></div>
                 <div><p className="success-label">Status</p><p className="success-value"><Badge tone={statusTone[detail.status]}>{statusLabel[detail.status]}</Badge></p></div>
               </div>
+              <button className="btn-outline btn-sm" style={{ marginBottom: 12 }} onClick={() => triggerPrint("a4")}><ClipboardList size={14} /> Imprimir Carnê</button>
               <div className="table-wrap" style={{ marginBottom: 12 }}>
                 <table className="table">
                   <thead><tr><th>Produto</th><th>Qtd</th><th>Preço</th><th>Subtotal</th></tr></thead>
@@ -3015,6 +3408,7 @@ function PagamentosPrazo({ db, updateDb, pushToast, askConfirm }) {
                   <button className="btn-gold btn-block" onClick={registerPayment}>Confirmar pagamento</button>
                 </div>
               )}
+              <Carne installmentSale={detail} customer={customerOf(detail.customerId)} settings={db.settings} />
             </div>
           );
         })()}
@@ -3318,6 +3712,101 @@ function Consignacao({ db, updateDb, pushToast, askConfirm }) {
   );
 }
 
+/* ============================== CONFIGURAÇÕES ============================== */
+
+function Configuracoes({ db, updateDb, pushToast, changeRole }) {
+  const [settingsForm, setSettingsForm] = useState({ ...db.settings });
+  const [resetModalOpen, setResetModalOpen] = useState(false);
+  const [confirmText, setConfirmText] = useState("");
+  const [resetting, setResetting] = useState(false);
+
+  const saveSettings = () => {
+    updateDb((prev) => ({ ...prev, settings: { ...prev.settings, ...settingsForm } }));
+    pushToast("Dados da loja atualizados.");
+  };
+
+  const canConfirmReset = confirmText.trim().toUpperCase() === "RESETAR";
+
+  const closeResetModal = () => { setResetModalOpen(false); setConfirmText(""); };
+
+  const executeReset = () => {
+    if (!canConfirmReset || resetting) return;
+    setResetting(true);
+    try {
+      updateDb((prev) => ({
+        products: [], categories: [...DEFAULT_CATEGORIES], customers: [], sellers: [], sales: [],
+        stockMovements: [], financeTransactions: [], cashRegisters: [], installmentSales: [],
+        consignments: [], settlements: [], settings: prev.settings,
+      }));
+      changeRole({ type: "admin" });
+      setResetModalOpen(false);
+      setConfirmText("");
+      pushToast("✅ Sistema resetado com sucesso! Pronto para um novo cadastro.");
+    } catch (e) {
+      pushToast("❌ Não foi possível concluir o reset. Nenhum dado foi apagado.", "error");
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  return (
+    <div className="page">
+      <div className="page-header">
+        <div><p className="page-eyebrow">Sistema</p><h1 className="page-title">Configurações</h1></div>
+      </div>
+
+      <div className="card">
+        <div className="card-header"><h3>Dados da loja</h3></div>
+        <div className="form-grid">
+          <Field label="Nome da loja" span><input value={settingsForm.companyName} onChange={(e) => setSettingsForm((f) => ({ ...f, companyName: e.target.value }))} /></Field>
+          <Field label="Telefone"><input value={settingsForm.phone} onChange={(e) => setSettingsForm((f) => ({ ...f, phone: e.target.value }))} /></Field>
+          <Field label="WhatsApp"><input value={settingsForm.whatsapp} onChange={(e) => setSettingsForm((f) => ({ ...f, whatsapp: e.target.value }))} /></Field>
+          <Field label="Instagram"><input value={settingsForm.instagram} onChange={(e) => setSettingsForm((f) => ({ ...f, instagram: e.target.value }))} /></Field>
+          <Field label="CNPJ"><input value={settingsForm.cnpj} onChange={(e) => setSettingsForm((f) => ({ ...f, cnpj: e.target.value }))} /></Field>
+          <Field label="Endereço" span><input value={settingsForm.address} onChange={(e) => setSettingsForm((f) => ({ ...f, address: e.target.value }))} /></Field>
+          <Field label="Mensagem do comprovante" span><input value={settingsForm.receiptMessage} onChange={(e) => setSettingsForm((f) => ({ ...f, receiptMessage: e.target.value }))} /></Field>
+          <Field label="Estoque mínimo padrão"><input type="number" min="0" value={settingsForm.defaultMinStock} onChange={(e) => setSettingsForm((f) => ({ ...f, defaultMinStock: Number(e.target.value) || 0 }))} /></Field>
+        </div>
+        <button className="btn-gold" onClick={saveSettings}>Salvar alterações</button>
+      </div>
+
+      <div className="card danger-zone">
+        <div className="card-header"><h3><ShieldAlert size={18} style={{ marginRight: 6, verticalAlign: "-3px" }} /> Resetar dados do sistema</h3></div>
+        <p className="danger-zone-text">
+          Use esta função para limpar dados de teste ou preparar o sistema para um novo usuário. Ela apaga permanentemente
+          todos os clientes, vendedoras, produtos, estoque, vendas, comissões, pagamentos a prazo e acertos de consignação
+          cadastrados — mas não afeta a estrutura do sistema, que continuará funcionando normalmente.
+        </p>
+        <button className="btn-danger-solid" onClick={() => setResetModalOpen(true)}><Trash2 size={16} /> Resetar todas as informações</button>
+      </div>
+
+      <Modal open={resetModalOpen} onClose={closeResetModal} title="⚠️ Atenção: reset completo do sistema">
+        <p className="reset-warning">Esta ação irá apagar permanentemente todos os dados cadastrados no sistema e não poderá ser desfeita.</p>
+        <p className="reset-list-title">Serão removidos:</p>
+        <ul className="reset-list">
+          <li>Clientes</li>
+          <li>Vendedoras</li>
+          <li>Produtos e categorias</li>
+          <li>Estoque e movimentações</li>
+          <li>Vendas, comissões e pagamentos a prazo</li>
+          <li>Saídas e acertos de consignação</li>
+          <li>Lançamentos financeiros e fechamentos de caixa</li>
+        </ul>
+        <p className="reset-note">Depois do reset, o sistema ficará limpo para que um novo cadastro de vendedoras, clientes, produtos e estoque seja feito. Os dados da loja (nome, contato) não serão alterados.</p>
+        <Field label="Digite RESETAR para confirmar">
+          <input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="RESETAR" autoComplete="off" />
+        </Field>
+        <div className="confirm-actions">
+          <button className="btn-outline" onClick={closeResetModal}>Cancelar</button>
+          <button className="btn-danger-solid" disabled={!canConfirmReset || resetting} onClick={executeReset}>
+            {resetting ? "Resetando sistema..." : "🗑️ CONFIRMAR RESET COMPLETO"}
+          </button>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
 /* ============================== GLOBAL STYLE ============================== */
 
 function GlobalStyle() {
@@ -3501,15 +3990,33 @@ function GlobalStyle() {
         transition: transform .1s ease, box-shadow .15s ease, opacity .15s ease;
       }
       .btn-gold { background: linear-gradient(135deg, var(--gold-400), var(--gold-600)); color: #241B04; box-shadow: 0 2px 6px rgba(169,128,31,0.35); }
+      .btn-gold:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
       .btn-gold:hover { opacity: 0.92; }
       .btn-gold:active { transform: scale(0.98); }
       .btn-outline { background: #fff; border-color: var(--line); color: var(--forest-900); }
       .btn-outline:hover { border-color: var(--gold-400); }
       .btn-danger { background: var(--danger-bg); color: var(--danger); }
       .btn-danger:hover { opacity: 0.85; }
+      .btn-danger-solid {
+        display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+        padding: 10px 16px; border-radius: 10px; font-size: 13.5px; font-weight: 700; border: 1px solid transparent; white-space: nowrap;
+        background: var(--danger); color: #fff; box-shadow: 0 2px 6px rgba(179,64,47,0.3);
+        transition: opacity .15s ease, transform .1s ease;
+      }
+      .btn-danger-solid:hover { opacity: 0.9; }
+      .btn-danger-solid:active { transform: scale(0.98); }
+      .btn-danger-solid:disabled { opacity: 0.4; cursor: not-allowed; }
       .btn-block { width: 100%; margin-top: 6px; }
       .btn-lg { padding: 13px 16px; font-size: 14.5px; }
       .btn-sm { padding: 6px 11px; font-size: 12px; }
+
+      .danger-zone { border-color: var(--danger-bg); background: linear-gradient(180deg, #fff, #FDF6F4); }
+      .danger-zone .card-header h3 { color: var(--danger); display: flex; align-items: center; }
+      .danger-zone-text { font-size: 13px; color: var(--ink-soft); line-height: 1.5; margin: 0 0 14px; max-width: 640px; }
+      .reset-warning { background: var(--danger-bg); color: var(--danger); padding: 10px 12px; border-radius: 10px; font-size: 13px; font-weight: 600; margin: 0 0 12px; }
+      .reset-list-title { font-size: 12.5px; font-weight: 700; color: var(--ink); margin: 0 0 4px; }
+      .reset-list { margin: 0 0 12px; padding-left: 18px; font-size: 12.5px; color: var(--ink-soft); line-height: 1.7; }
+      .reset-note { font-size: 12px; color: var(--ink-soft); margin: 0 0 14px; }
 
       .icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 8px; background: transparent; border: 1px solid transparent; color: var(--ink-soft); }
       .icon-btn:hover { background: var(--cream); color: var(--forest-900); }
@@ -3527,6 +4034,24 @@ function GlobalStyle() {
 
       .loading-screen { min-height: 100vh; width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background: var(--cream, #FBF8F1); font-family: 'Inter', sans-serif; color: #6B6A5E; }
       .loading-logo { width: 96px; height: auto; animation: pulse 1.4s ease-in-out infinite; }
+
+      .login-page { min-height: 100vh; width: 100%; display: flex; align-items: center; justify-content: center; background: var(--cream); padding: 20px; }
+      .login-card { background: #fff; border: 1px solid var(--line); border-radius: 18px; padding: 32px 28px; width: 100%; max-width: 380px; box-shadow: 0 20px 50px rgba(15,25,20,0.12); text-align: center; }
+      .login-logo { width: 120px; height: auto; margin: 0 auto 10px; display: block; }
+      .login-title { font-size: 20px; margin-bottom: 2px; }
+      .login-subtitle { font-size: 12.5px; color: var(--ink-soft); margin: 0 0 20px; }
+      .login-card .field { text-align: left; }
+      .login-error { background: var(--danger-bg); color: var(--danger); font-size: 12.5px; font-weight: 600; padding: 8px 10px; border-radius: 9px; margin: 0 0 12px; }
+
+      .logout-btn { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 8px; margin-top: 8px; border-radius: 9px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: rgba(255,255,255,0.7); font-size: 11.5px; }
+      .logout-btn:hover { background: rgba(255,255,255,0.1); color: #fff; }
+
+      .sync-badge { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 8px; border-radius: 8px; font-size: 10.5px; font-weight: 600; margin-top: 4px; }
+      .sync-ok { color: rgba(255,255,255,0.4); }
+      .sync-saving { color: var(--gold-400); }
+      .sync-saving svg { animation: spin 1s linear infinite; }
+      .sync-error { color: #F0A58C; background: rgba(179,64,47,0.25); }
+      @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       @keyframes pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.06); opacity: 0.85; } }
 
       .modal-overlay { position: fixed; inset: 0; background: rgba(15,25,20,0.45); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 16px; backdrop-filter: blur(2px); }
@@ -3601,6 +4126,7 @@ function GlobalStyle() {
       .payment-option-active { border-color: var(--gold-500); background: var(--gold-100); color: var(--gold-600); }
 
       .cash-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .prazo-block { background: var(--cream); border-radius: 12px; padding: 12px; margin-bottom: 4px; }
       .troco-display { padding: 9px 11px; border-radius: 9px; background: var(--success-bg); color: var(--forest-800); font-weight: 700; font-size: 14px; }
 
       .success-banner { display: flex; align-items: center; gap: 8px; background: var(--success-bg); color: var(--forest-800); padding: 10px 12px; border-radius: 10px; font-weight: 700; font-size: 13.5px; margin-bottom: 14px; }
@@ -3624,6 +4150,10 @@ function GlobalStyle() {
       .receipt-table th { text-align: left; font-size: 10.5px; color: var(--ink-soft); border-bottom: 1px solid var(--line); padding: 4px 2px; }
       .receipt-table td { padding: 4px 2px; font-size: 12px; border-bottom: 1px dotted var(--line); }
       .receipt-thanks { text-align: center; font-weight: 600; color: var(--forest-800); margin: 8px 0 0; }
+      .carne-history-title { font-weight: 700; font-size: 12px; margin: 6px 0 4px; color: var(--forest-900); }
+      .carne-empty { font-size: 11.5px; color: var(--ink-soft); margin: 0 0 6px; }
+      .carne-blank-row { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--ink-soft); border-bottom: 1px dotted var(--line); padding: 5px 2px; }
+      .carne-quitado { text-align: center; font-weight: 800; letter-spacing: 0.04em; color: var(--forest-700); background: var(--success-bg); padding: 8px; border-radius: 8px; margin: 8px 0 0; }
 
       .tabs { display: flex; gap: 6px; }
       .tabs button { padding: 9px 16px; border-radius: 10px 10px 0 0; border: 1px solid var(--line); border-bottom: none; background: var(--cream); font-size: 13px; font-weight: 600; color: var(--ink-soft); display: flex; align-items: center; }
@@ -3655,8 +4185,9 @@ function GlobalStyle() {
 
       @media print {
         body * { visibility: hidden !important; }
-        .receipt, .receipt * { visibility: visible !important; }
-        .receipt {
+        .print-target, .print-target * { visibility: visible !important; }
+        .receipt:not(.print-target) { display: none !important; }
+        .print-target {
           position: fixed !important;
           top: 0; left: 0; right: 0;
           margin: 0 auto;
