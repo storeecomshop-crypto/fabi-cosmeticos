@@ -698,23 +698,6 @@ export default function FabiCosmeticosApp() {
     return () => { cancelled = true; };
   }, [session, pushToast]);
 
-  // ---- sincronização em tempo real entre dispositivos/abas ----
-  useEffect(() => {
-    if (!session) return;
-    const channel = supabase
-      .channel("app_state_sync")
-      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "app_state", filter: `id=eq.${APP_STATE_ROW_ID}` }, (payload) => {
-        const incoming = payload.new?.data;
-        if (!incoming) return;
-        const serialized = JSON.stringify(incoming);
-        if (serialized === lastSyncedRef.current) return;
-        lastSyncedRef.current = serialized;
-        setDb(withDefaults(incoming));
-      })
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [session]);
-
   // ---- gravar no banco (debounced, à prova de corrida entre salvamentos, com nova tentativa automática) ----
   const dbRef = useRef(db);
   dbRef.current = db;
@@ -756,6 +739,34 @@ export default function FabiCosmeticosApp() {
       }
     }
   }, [pushToast]);
+
+  // ---- sincronização em tempo real entre dispositivos/abas ----
+  useEffect(() => {
+    if (!session) return;
+    const channel = supabase
+      .channel("app_state_sync")
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "app_state", filter: `id=eq.${APP_STATE_ROW_ID}` }, (payload) => {
+        const incoming = payload.new?.data;
+        if (!incoming) return;
+        const serialized = JSON.stringify(incoming);
+        if (serialized === lastSyncedRef.current) return;
+        // Se ainda existem alterações locais não confirmadas como salvas
+        // (por exemplo, um segundo produto cadastrado enquanto o primeiro
+        // salvamento ainda estava em andamento), esse aviso pode estar
+        // desatualizado em relação ao que está na tela agora. Ignorar aqui
+        // e deixar nosso próprio salvamento (que já está em andamento)
+        // garantir que a versão mais recente prevaleça — é exatamente isso
+        // que evita um cadastro "sumir" da lista.
+        if (dbRef.current && JSON.stringify(dbRef.current) !== lastSyncedRef.current) {
+          if (!savingRef.current) persistNow();
+          return;
+        }
+        lastSyncedRef.current = serialized;
+        setDb(withDefaults(incoming));
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [session, persistNow]);
 
   useEffect(() => {
     if (!db || !session) return;
@@ -879,15 +890,13 @@ export default function FabiCosmeticosApp() {
 }
 
 function SyncStatusBadge({ status }) {
-  const config = {
-    ok: { icon: Check, label: "Sincronizado", cls: "sync-ok" },
-    saving: { icon: Repeat, label: "Salvando…", cls: "sync-saving" },
-    error: { icon: AlertTriangle, label: "Sem conexão — tentando de novo", cls: "sync-error" },
-  }[status] || { icon: Check, label: "Sincronizado", cls: "sync-ok" };
-  const Icon = config.icon;
+  // A sincronização automática continua acontecendo sozinha em segundo plano
+  // o tempo todo (a cada alteração, cadastro, venda etc.) — esse indicador só
+  // aparece na tela quando há algo que realmente precisa da sua atenção.
+  if (status !== "error") return null;
   return (
-    <div className={`sync-badge ${config.cls}`}>
-      <Icon size={12} /> <span>{config.label}</span>
+    <div className="sync-badge sync-error">
+      <AlertTriangle size={12} /> <span>Sem conexão — tentando de novo</span>
     </div>
   );
 }
